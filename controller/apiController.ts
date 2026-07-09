@@ -65,6 +65,23 @@ export function createApiRouter(db: Database): Router {
     }
   });
 
+  router.post("/auth/logout", async (req: Request, res: Response) => {
+    logger.info(`[API] POST /auth/logout`);
+    try {
+      const token = extractToken(req);
+      if (!token) {
+        res.status(401).json({ error: "Missing Authorization header" });
+        return;
+      }
+      const result = await auth.Logout(token);
+      logger.info(`[API] POST /auth/logout → ${result.status}`);
+      res.status(result.status).json(result);
+    } catch (e) {
+      logger.error("[POST /auth/logout]", e);
+      res.status(500).json({ error: String(e) });
+    }
+  });
+
   router.get("/auth/me", async (req: Request, res: Response) => {
     logger.info(`[API] GET /auth/me`);
     try {

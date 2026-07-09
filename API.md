@@ -1,6 +1,6 @@
 # hrout API — Frontend TL;DR
 
-**Base URL**: `http://localhost:8080`  
+**Base URL**: `https://hroute-server.onrender.com/api`  
 **Auth**: `Authorization: Bearer <access_token>` (required on protected routes)
 
 ---
@@ -227,12 +227,12 @@ interface Application {
 ## Vanilla JS Quick-Start
 
 ```javascript
-const BASE = "http://localhost:8080";
+const BASE = "https://hroute-server.onrender.com/api";
 let token = null;
 
 // 1. Log in (or register)
 async function login(email, password) {
-  const res = await fetch(`${BASE}/api/auth/login`, {
+  const res = await fetch(`${BASE}/auth/login`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ email, password }),
@@ -248,13 +248,13 @@ async function login(email, password) {
 
 // 2. Fetch recent jobs (no auth needed)
 async function getRecentJobs() {
-  const res = await fetch(`${BASE}/api/jobs/recent`);
+  const res = await fetch(`${BASE}/jobs/recent`);
   return res.json(); // bare array
 }
 
 // 3. Semantic search (auth required — uses your resume embedding)
 async function searchJobs() {
-  const res = await fetch(`${BASE}/api/jobs/search`, {
+  const res = await fetch(`${BASE}/jobs/search`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",

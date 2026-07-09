@@ -145,6 +145,23 @@ class AuthController {
     }
   }
 
+  async Logout(token: string) {
+    logger.info(`[Auth] Logout entry (token=${token.slice(0, 12)}...)`);
+    try {
+      const result = await this.db.logout();
+      if (result.status === 200) {
+        logger.info(`[Auth] Logout success`);
+        await log(`[Auth] Logout success`);
+        return { status: 200, message: "Logged out" };
+      }
+      logger.warn(`[Auth] Logout failed: ${result.error}`);
+      return { status: 500, error: result.error ?? "Logout failed" };
+    } catch (e) {
+      logger.error("[Auth] Logout error:", e);
+      return { status: 500, error: String(e) };
+    }
+  }
+
   async DeleteAccount(token: string) {
     logger.info(`[Auth] DeleteAccount entry (token=${token.slice(0, 12)}...)`);
     try {
