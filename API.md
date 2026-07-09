@@ -138,6 +138,40 @@ No auth required.
 
 ---
 
+## Resume — `/api/resume/`
+
+| Method | Path | Auth | Body | Returns |
+|--------|------|------|------|---------|
+| POST | `/api/resume/upload` | Bearer | `{ resume_text }` or `{ file_data, file_type }` | `{ profile }` |
+
+**`resume_text`**: raw text extracted by the frontend (easiest).  
+**`file_data` + `file_type`**: base64-encoded file content + `"pdf"` or `"txt"`. Server extracts text server-side.
+
+Pipeline on upload:
+1. Extract text (from body or PDF parse)
+2. LLM extracts structured data: skills, experience_years, top_roles, locations_preferred, remote_preference
+3. Saves everything to the user's profile
+4. Generates a resume embedding (384-dim) for semantic job search
+5. Returns the structured profile
+
+```json
+{
+  "status": 200,
+  "profile": {
+    "resume_text": "…",
+    "skills": ["TypeScript", "React", "Go"],
+    "experience_years": 5,
+    "top_roles": ["Senior Frontend Engineer"],
+    "locations_preferred": ["Remote", "Lagos"],
+    "remote_preference": "remote"
+  }
+}
+```
+
+After upload, the user's profile is fully populated. `GET /auth/me` will include all these fields, and `POST /jobs/search` will work (it needs the resume embedding).
+
+---
+
 ## Applications — `/api/applications/`
 
 **Not yet wired.** The DB schema exists:

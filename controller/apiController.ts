@@ -3,12 +3,14 @@ import type { Request, Response } from "express";
 import type { Database } from "../model/database";
 import { AuthController } from "./authController";
 import { JobApplicationController } from "./jobApplication";
+import { ResumeController } from "./resumeController";
 import { log, logger } from "../utils/logger";
 
 export function createApiRouter(db: Database): Router {
   const router = Router();
   const auth = new AuthController(db);
   const jobs = new JobApplicationController(db);
+  const resume = new ResumeController(db);
 
   // ── Auth routes ──────────────────────────────────────────────
 
@@ -192,6 +194,25 @@ export function createApiRouter(db: Database): Router {
       res.json(result);
     } catch (e) {
       logger.error("[POST /jobs/search]", e);
+      res.status(500).json({ error: String(e) });
+    }
+  });
+
+  // ── Resume routes ───────────────────────────────────────────
+
+  router.post("/resume/upload", async (req: Request, res: Response) => {
+    logger.info(`[API] POST /resume/upload`);
+    try {
+      const token = extractToken(req);
+      if (!token) {
+        res.status(401).json({ error: "Missing Authorization header" });
+        return;
+      }
+      const result = await resume.upload(token, req.body as { resume_text?: string; file_data?: string; file_type?: string });
+      logger.info(`[API] POST /resume/upload → ${result.status}`);
+      res.status(result.status).json(result);
+    } catch (e) {
+      logger.error("[POST /resume/upload]", e);
       res.status(500).json({ error: String(e) });
     }
   });

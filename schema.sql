@@ -78,11 +78,29 @@ create policy "applications_own"
   using (user_id = auth.uid())
   with check (user_id = auth.uid());
 
--- ── Profiles (add resume_embedding column) ───────────────────
+-- ── Profiles ────────────────────────────────────────────────
 
--- Add the vector column to your existing profiles table
-alter table public.profiles
-  add column if not exists resume_embedding vector(384);
+create table if not exists public.profiles (
+  id                uuid primary key references auth.users(id) on delete cascade,
+  display_name      text,
+  headline          text,
+  location          text,
+  avatar_url        text,
+  timezone          text,
+  skills            jsonb default '[]'::jsonb,
+  resume_text       text,
+  resume_embedding  vector(384),
+  created_at        timestamptz default now()
+);
+
+alter table public.profiles enable row level security;
+
+drop policy if exists "profiles_own" on public.profiles;
+create policy "profiles_own"
+  on public.profiles for all
+  to authenticated
+  using (id = auth.uid())
+  with check (id = auth.uid());
 
 -- ── Vector search function ───────────────────────────────────
 

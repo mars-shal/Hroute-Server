@@ -241,6 +241,29 @@ class LLM {
     return result;
   }
 
+  async extractProfile(text: string): Promise<Record<string, unknown>> {
+    if (await this.isRateLimited('llama-3.1-8b-instant')) {
+      logger.warn('[LLM] extractProfile skipped — rate limited');
+      return { skills: [], experience_years: 0 };
+    }
+
+    const MAX = 6000;
+    const truncated = text.length <= MAX ? text : text.slice(0, 2000) + "\n[...]\n" + text.slice(-(MAX - 2000 - 5));
+    logger.info(`[LLM] extractProfile (text.length=${text.length}, truncated=${truncated.length})`);
+    await log(`[LLM] extractProfile starting`);
+    const result = await this.structured(
+      `Extract structured profile data from this resume. Return a JSON object with fields: skills (array of strings), experience_years (number), top_roles (array of likely job titles), locations_preferred (array of locations), remote_preference ("remote"|"hybrid"|"onsite"|"not_specified"). Use empty arrays for missing list fields and 0 for experience_years if unknown.\n\n${truncated}`,
+      (raw: string) => {
+        const cleaned = raw.replace(/```(?:json)?\s*/gi, "").trim();
+        return JSON.parse(cleaned) as Record<string, unknown>;
+      },
+      { temperature: 0.1 },
+    );
+    logger.info(`[LLM] extractProfile done`);
+    await log(`[LLM] extractProfile result: ${JSON.stringify(result).slice(0, 300)}`);
+    return result;
+  }
+
   async matchResumeToJob(
     resume: string,
     job: string,
