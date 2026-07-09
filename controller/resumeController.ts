@@ -1,4 +1,4 @@
-import { getDocument } from 'pdfjs-dist';
+import pdf from 'pdf-parse';
 import type { Database } from '../model/database';
 import { EmbeddingService } from '../utils/embedding';
 import { LLM } from '../model/LLM';
@@ -86,15 +86,8 @@ class ResumeController {
   }
 
   private async extractPdfText(buf: Buffer): Promise<string> {
-    const doc = await getDocument({ data: buf }).promise;
-    const pages: string[] = [];
-    for (let i = 1; i <= doc.numPages; i++) {
-      const page = await doc.getPage(i);
-      const content = await page.getTextContent();
-      const text = content.items.map((item: any) => item.str).join(' ');
-      pages.push(text);
-    }
-    return pages.join('\n');
+    const data = await pdf(buf);
+    return data.text;
   }
 }
 
