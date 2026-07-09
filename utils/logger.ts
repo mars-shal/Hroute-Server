@@ -1,8 +1,23 @@
 import chalk from 'chalk';
-import { appendFile } from "node:fs/promises"
+import { appendFile, mkdir } from "node:fs/promises"
+import { existsSync } from "node:fs"
+
+async function ensureLogDir(file: string) {
+  const dir = file.substring(0, file.lastIndexOf("/"));
+  if (dir && !existsSync(dir)) {
+    await mkdir(dir, { recursive: true });
+  }
+}
 
 export const log = async (text: any, file: string = "./logs/log.log") => {
-  await appendFile(file, `\n${text}`)
+  try {
+    await appendFile(file, `\n${text}`);
+  } catch (e: any) {
+    if (e?.code === "ENOENT") {
+      await ensureLogDir(file);
+      await appendFile(file, `\n${text}`);
+    }
+  }
 }
 
 export const logger = {
