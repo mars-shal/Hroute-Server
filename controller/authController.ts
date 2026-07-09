@@ -93,9 +93,17 @@ class AuthController {
             display_name: result.display_name,
             avatar_url: result.avatar_url,
             timezone: result.timezone,
-            created_at: result.created_at,
+            headline: result.headline,
+            location: result.location,
+            role: result.role,
+            work_style: result.work_style,
+            work_style_hint: result.work_style_hint,
+            experience: result.experience,
+            experience_hint: result.experience_hint,
+            salary_target: result.salary_target,
             skills: result.skills,
             resume_text: result.resume_text,
+            created_at: result.created_at,
           },
         };
       }

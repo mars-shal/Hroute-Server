@@ -244,7 +244,7 @@ class LLM {
   async extractProfile(text: string): Promise<Record<string, unknown>> {
     if (await this.isRateLimited('llama-3.1-8b-instant')) {
       logger.warn('[LLM] extractProfile skipped — rate limited');
-      return { skills: [], experience_years: 0 };
+      return { skills: [] };
     }
 
     const MAX = 6000;
@@ -252,7 +252,16 @@ class LLM {
     logger.info(`[LLM] extractProfile (text.length=${text.length}, truncated=${truncated.length})`);
     await log(`[LLM] extractProfile starting`);
     const result = await this.structured(
-      `Extract structured profile data from this resume. Return a JSON object with fields: skills (array of strings), experience_years (number), top_roles (array of likely job titles), locations_preferred (array of locations), remote_preference ("remote"|"hybrid"|"onsite"|"not_specified"). Use empty arrays for missing list fields and 0 for experience_years if unknown.\n\n${truncated}`,
+      `Extract structured profile data from this resume. Return a JSON object with these fields:
+        - role: best job title fit for this person (string)
+        - location: their location (string, or null)
+        - work_style: "Remote" | "Hybrid" | "Onsite" | null
+        - work_style_hint: extra context like "open to relocate" (string, or null)
+        - experience: total experience as a readable string, e.g. "3 years", "1 year" (string)
+        - experience_hint: extra context like "incl. 2 internships" (string, or null)
+        - salary_target: salary expectation if mentioned, e.g. "₦400k – ₦700k / mo" (string, or null)
+        - skills: array of skills (string[])
+      Use null for missing optional fields. Use empty array for missing skills.\n\n${truncated}`,
       (raw: string) => {
         const cleaned = raw.replace(/```(?:json)?\s*/gi, "").trim();
         return JSON.parse(cleaned) as Record<string, unknown>;

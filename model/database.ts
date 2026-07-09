@@ -333,9 +333,17 @@ class Database {
         display_name: profileData.display_name ?? null,
         avatar_url: profileData.avatar_url ?? null,
         timezone: profileData.timezone ?? null,
-        created_at: profileData.created_at ?? null,
+        headline: profileData.headline ?? null,
+        location: profileData.location ?? null,
+        role: profileData.role ?? null,
+        work_style: profileData.work_style ?? null,
+        work_style_hint: profileData.work_style_hint ?? null,
+        experience: profileData.experience ?? null,
+        experience_hint: profileData.experience_hint ?? null,
+        salary_target: profileData.salary_target ?? null,
         skills: profileData.skills ?? null,
         resume_text: profileData.resume_text ?? null,
+        created_at: profileData.created_at ?? null,
         status: 200,
       };
     } catch (e) {

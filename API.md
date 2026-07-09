@@ -159,16 +159,27 @@ Pipeline on upload:
   "status": 200,
   "profile": {
     "resume_text": "…",
-    "skills": ["TypeScript", "React", "Go"],
-    "experience_years": 5,
-    "top_roles": ["Senior Frontend Engineer"],
-    "locations_preferred": ["Remote", "Lagos"],
-    "remote_preference": "remote"
+    "role": "Frontend Developer",
+    "location": "Lagos, Nigeria",
+    "work_style": "Remote",
+    "work_style_hint": "open to relocate",
+    "experience": "1 year",
+    "experience_hint": "incl. 2 internships",
+    "salary_target": "₦400k – ₦700k / mo",
+    "skills": ["TypeScript", "React", "Go"]
   }
 }
 ```
 
-After upload, the user's profile is fully populated. `GET /auth/me` will include all these fields, and `POST /jobs/search` will work (it needs the resume embedding).
+After upload, the user's profile is fully populated. `GET /auth/me` will include all these fields, and `POST /jobs/search` will work (it needs the resume embedding). Mapped to UI:
+
+```jsx
+<ProfileRow label="Role"     value={profile.role}           hint={profile.role ? undefined : undefined} />
+<ProfileRow label="Location" value={profile.location} />
+<ProfileRow label="Work style" value={profile.work_style}   hint={profile.work_style_hint} />
+<ProfileRow label="Experience" value={profile.experience}   hint={profile.experience_hint} />
+<ProfileRow label="Salary target" value={profile.salary_target} />
+```
 
 ---
 
