@@ -1,4 +1,4 @@
-import pdf from 'pdf-parse';
+import { extractText } from 'unpdf';
 import type { Database } from '../model/database';
 import { EmbeddingService } from '../utils/embedding';
 import { LLM } from '../model/LLM';
@@ -86,8 +86,8 @@ class ResumeController {
   }
 
   private async extractPdfText(buf: Buffer): Promise<string> {
-    const data = await pdf(buf);
-    return data.text;
+    const { text } = await extractText(new Uint8Array(buf));
+    return text;
   }
 }
 
