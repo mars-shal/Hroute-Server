@@ -1,0 +1,1 @@
+// Checeks the db for old job applicaitons then removes them
