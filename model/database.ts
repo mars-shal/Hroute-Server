@@ -358,7 +358,7 @@ class Database {
       if (error) throw error;
       return { status: 200 };
     } catch (e) {
-      const msg = String(e);
+      const msg = e instanceof Error ? e.message : typeof e === 'object' ? JSON.stringify(e) : String(e);
       logger.error(`[updateUser] Error: ${msg}`);
 
       if (msg.toLowerCase().includes('column') && msg.toLowerCase().includes('does not exist')) {
