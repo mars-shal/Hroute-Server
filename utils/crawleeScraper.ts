@@ -22,6 +22,12 @@ export async function scrapePage(
       requestQueue,
       maxRequestsPerCrawl: 1,
       maxConcurrency: 1,
+      maxRequestRetries: 1,
+      useSessionPool: false,
+      autoscaledPoolOptions: {
+        maxConcurrency: 1,
+        minConcurrency: 1,
+      },
       requestHandler: async ({ $ }) => {
         // Remove non-content elements
         $("script, style, nav, footer, header, aside, .sidebar, .menu, iframe").remove();
@@ -71,6 +77,12 @@ export async function discoverPageLinks(seedUrl: string): Promise<string[]> {
       requestQueue,
       maxRequestsPerCrawl: 1,
       maxConcurrency: 1,
+      maxRequestRetries: 1,
+      useSessionPool: false,
+      autoscaledPoolOptions: {
+        maxConcurrency: 1,
+        minConcurrency: 1,
+      },
       requestHandler: async ({ $, request }) => {
         $("a[href]").each((_, el) => {
           const href = $(el).attr("href");

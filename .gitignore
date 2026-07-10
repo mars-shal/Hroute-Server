@@ -1,3 +1,6 @@
+# opencode session / plan / draft artifacts
+.omo/
+
 # dependencies (bun install)
 node_modules
 
