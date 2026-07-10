@@ -1,7 +1,7 @@
 import axios from "axios";
 import { log, logger } from "./logger.js";
 import { RedisModel } from "../model/redis.js";
-import { scrapePage, discoverPageLinks } from "./crawleeScraper.js";
+import { scrapePage, discoverPageLinks, isNonJobUrl } from "./crawleeScraper.js";
 import { discoverSitemapUrls } from "./sitemapDiscoverer.js";
 
 type ApiHandlerData = {
@@ -137,9 +137,16 @@ class Crawler {
     );
     logger.info(`[Crawler] discoverUrls: ${links.length} raw links from ${seedUrl}`);
 
+    // Filter out non-job URLs before checking Redis or scraping
+    const jobLinks = links.filter((link) => !isNonJobUrl(link));
+    const skippedCount = links.length - jobLinks.length;
+    if (skippedCount > 0) {
+      logger.info(`[Crawler] discoverUrls filtered ${skippedCount} non-job URLs from ${seedUrl}`);
+    }
+
     // Filter out already-scraped URLs
     const fresh: string[] = [];
-    for (const [i, link] of links.entries()) {
+    for (const [i, link] of jobLinks.entries()) {
       const seen = await this.redis.isMember("scraped_urls", link);
       if (!seen) fresh.push(link);
 
@@ -171,6 +178,11 @@ class Crawler {
       // Throttle: stay within Firecrawl rate limit (~13 req/min) between page scrapes
       if (idx > 0) {
         await new Promise((r) => setTimeout(r, 5000));
+      }
+
+      if (isNonJobUrl(url)) {
+        logger.info(`[Crawler] scrapePages skip (non-job): ${url}`);
+        continue;
       }
 
       const alreadyScraped = await this.redis.isMember("scraped_urls", url);

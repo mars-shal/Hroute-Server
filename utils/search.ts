@@ -33,5 +33,5 @@ export const SEARCHURLS = [
   "https://www.gebeya.com",
   "https://www.peepuu.com",
   "https://www.ycombinator.com/jobs",
-  "https://remotewoman.com"
+  "https://remotewoman.com>"
 ];

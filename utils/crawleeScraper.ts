@@ -4,8 +4,9 @@ import { log, logger } from "./logger.js";
 
 const TIMEOUT = 30000;
 
-/** URL path patterns that are ad/tracking links, not job pages */
+/** URL path patterns that are ad/tracking or non-job pages */
 const SKIP_LINK_PATTERNS = [
+  // Ads & tracking
   "/listing_ads/",
   "/click",
   "/goto/",
@@ -15,7 +16,29 @@ const SKIP_LINK_PATTERNS = [
   "/outbound",
   "sponsor",
   "/banner",
+  // Site pages (not job listings)
+  "/company/",
+  "/categories/",
+  ".rss",
+  "/remote-jobs/search",
+  "/reviews-success-stories",
+  "/terms-of-use",
+  "/web/login",
+  "support.",
+  "/startups",
+  "/role/l/",
+  // Social media
+  "twitter.com/",
+  "t.me/",
 ];
+
+/**
+ * Check whether a URL is a non-job page (ad/tracking/site page/social).
+ * Shared between discovery and scraping to avoid wasting Firecrawl credits.
+ */
+export function isNonJobUrl(url: string): boolean {
+  return SKIP_LINK_PATTERNS.some((p) => url.includes(p));
+}
 
 /**
  * Scrape a single page using axios + cheerio.
@@ -28,10 +51,9 @@ export async function scrapePage(
   logger.info(`[Crawlee] scrapePage entry: ${url}`);
   await log(`[Crawlee] scrapePage: ${url}`);
 
-  // Skip ad/tracking URLs before making any request
-  const isAd = SKIP_LINK_PATTERNS.some((p) => url.includes(p));
-  if (isAd) {
-    logger.info(`[Crawlee] scrapePage skip (ad/tracking): ${url}`);
+  // Skip non-job URLs before making any request
+  if (isNonJobUrl(url)) {
+    logger.info(`[Crawlee] scrapePage skip (non-job): ${url}`);
     return null;
   }
 
@@ -90,8 +112,7 @@ export async function discoverPageLinks(seedUrl: string): Promise<string[]> {
       if (!href || href.startsWith("#") || href.startsWith("javascript:")) return;
       try {
         const absolute = new URL(href, seedUrl).href;
-        const isAd = SKIP_LINK_PATTERNS.some((p) => absolute.includes(p));
-        if (isAd) return;
+        if (isNonJobUrl(absolute)) return;
         links.add(absolute);
       } catch {
         // Skip malformed URLs
