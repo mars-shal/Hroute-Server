@@ -1,6 +1,6 @@
 {
   "functions": {
-    "api/index.ts": {
+    "index.ts": {
       "maxDuration": 30
     }
   }

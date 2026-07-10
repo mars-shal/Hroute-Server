@@ -5,7 +5,7 @@
   "private": true,
   "scripts": {
     "start": "bun install --no-frozen-lockfile && bun run index.ts",
-    "build": "bun build ./index.ts --outdir ./dist --target node && bun build ./api/index.ts --outdir ./api --target node",
+    "build": "bun build ./index.ts --outdir ./dist --target node",
     "test": "bun test",
     "e2e:live": "bun run scripts/e2e-live.ts"
   },
