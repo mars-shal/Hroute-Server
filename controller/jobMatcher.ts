@@ -1,6 +1,7 @@
 import { createHash } from "crypto";
-import type { Database } from "../model/database.js";
+import type { DatabaseLike } from "../model/database.js";
 import { RedisModel } from "../model/redis.js";
+import type { RedisLike } from "../model/redis.js";
 import { logger } from "../utils/logger.js";
 
 const MATCH_CACHE_TTL_SECONDS = 600;
@@ -54,12 +55,12 @@ type CachedMatchPayload = {
 };
 
 class JobMatcher {
-  private db: Database;
-  private redis: RedisModel;
+  private db: DatabaseLike;
+  private redis: RedisLike;
 
-  constructor(db: Database) {
+  constructor(db: DatabaseLike, redis: RedisLike = new RedisModel()) {
     this.db = db;
-    this.redis = new RedisModel();
+    this.redis = redis;
   }
 
   async bumpJobsIndexVersion(): Promise<string> {
@@ -279,6 +280,8 @@ class JobMatcher {
     return Math.max(0, Math.min(1, value));
   }
 }
+
+export type JobMatcherService = Pick<JobMatcher, "match" | "bumpJobsIndexVersion">;
 
 export { JobMatcher };
 export type { MatchFilters, MatchProgress, MatchProgressHandler, MatchResponse, RankedJob };

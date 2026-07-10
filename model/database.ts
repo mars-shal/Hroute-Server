@@ -750,5 +750,37 @@ export async function connectDatabase(): Promise<Database> {
   return dbInstance;
 }
 
+export type DatabaseLike = Pick<
+  Database,
+  | "authenticateToken"
+  | "getFile"
+  | "listFiles"
+  | "uploadFile"
+  | "deleteFile"
+  | "uploadResumeFile"
+  | "getResumeSignedUrl"
+  | "getData"
+  | "insertData"
+  | "createUser"
+  | "loginUser"
+  | "refreshToken"
+  | "logout"
+  | "getUser"
+  | "updateUser"
+  | "updateUserPassword"
+  | "deleteUser"
+  | "storeJob"
+  | "storeJobVector"
+  | "getJobsRecent"
+  | "getJobBySourceUrl"
+  | "searchJobsByEmbedding"
+  | "saveApplication"
+  | "updateApplicationStatus"
+  | "getApplications"
+  | "deleteApplication"
+  | "saveResumeEmbedding"
+  | "getResumeEmbedding"
+>;
+
 export { Database };
 export type { AuthClaims };

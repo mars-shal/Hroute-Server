@@ -280,4 +280,9 @@ class RedisModel {
   }
 }
 
+export type RedisLike = Pick<
+  RedisModel,
+  "get" | "setWithExpiry" | "delete" | "increment"
+>;
+
 export { RedisModel };

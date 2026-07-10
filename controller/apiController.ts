@@ -1,18 +1,25 @@
 import { Router } from "express";
 import type { Request, Response } from "express";
-import type { Database } from "../model/database.js";
+import type { DatabaseLike } from "../model/database.js";
 import { AuthController } from "./authController.js";
 import { ChatController } from "./chatController.js";
 import { JobApplicationController } from "./jobApplication.js";
 import { ResumeController } from "./resumeController.js";
 import { log, logger } from "../utils/logger.js";
 
-export function createApiRouter(db: Database): Router {
+type ApiControllerDeps = {
+  auth?: AuthController;
+  chat?: ChatController;
+  jobs?: JobApplicationController;
+  resume?: ResumeController;
+};
+
+export function createApiRouter(db: DatabaseLike, deps: ApiControllerDeps = {}): Router {
   const router = Router();
-  const auth = new AuthController(db);
-  const chat = new ChatController(db);
-  const jobs = new JobApplicationController(db);
-  const resume = new ResumeController(db);
+  const auth = deps.auth ?? new AuthController(db);
+  const chat = deps.chat ?? new ChatController(db);
+  const jobs = deps.jobs ?? new JobApplicationController(db);
+  const resume = deps.resume ?? new ResumeController(db);
 
   // ── Auth routes ──────────────────────────────────────────────
 

@@ -1,5 +1,5 @@
 import { extractText } from 'unpdf';
-import type { Database } from '../model/database.js';
+import type { DatabaseLike } from '../model/database.js';
 import { EmbeddingService } from '../utils/embedding.js';
 import { LLM } from '../model/LLM.js';
 import { log, logger } from '../utils/logger.js';
@@ -17,10 +17,10 @@ interface UploadResult {
 }
 
 class ResumeController {
-  private db: Database;
+  private db: DatabaseLike;
   private llm: LLM;
 
-  constructor(db: Database) {
+  constructor(db: DatabaseLike) {
     this.db = db;
     this.llm = new LLM();
   }

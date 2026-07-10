@@ -1,9 +1,9 @@
 import { Crawler } from "../utils/crawler.js";
 import { EmbeddingService } from "../utils/embedding.js";
 import { LLM } from "../model/LLM.js";
-import type { Database } from "../model/database.js";
+import type { DatabaseLike } from "../model/database.js";
 import { JobMatcher } from "./jobMatcher.js";
-import type { MatchFilters, MatchProgressHandler } from "./jobMatcher.js";
+import type { JobMatcherService, MatchFilters, MatchProgressHandler } from "./jobMatcher.js";
 import { log, logger } from "../utils/logger.js";
 import { SEARCHURLS } from "../utils/search.js";
 
@@ -25,14 +25,14 @@ interface DiscoverResult {
 class JobApplicationController {
   private crawler: Crawler;
   private llm: LLM;
-  private db: Database;
-  private matcher: JobMatcher;
+  private db: DatabaseLike;
+  private matcher: JobMatcherService;
 
-  constructor(db: Database) {
+  constructor(db: DatabaseLike, matcher?: JobMatcherService) {
     this.crawler = new Crawler();
     this.llm = new LLM();
     this.db = db;
-    this.matcher = new JobMatcher(db);
+    this.matcher = matcher ?? new JobMatcher(db);
   }
 
   async Discover(seedUrls?: string[]): Promise<DiscoverResult> {
@@ -181,3 +181,5 @@ class JobApplicationController {
 }
 
 export { JobApplicationController };
+export type JobSearchService = Pick<JobApplicationController, "Search">;
+export type { JobMatcherService };
