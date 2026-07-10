@@ -190,6 +190,16 @@ export function createApiRouter(db: DatabaseLike, deps: ApiControllerDeps = {}):
   // ── Job routes ───────────────────────────────────────────────
 
   router.post("/jobs/discover", async (req: Request, res: Response) => {
+    // Optional API key guard — set DISCOVER_API_KEY to enable
+    const discoverApiKey = process.env.DISCOVER_API_KEY;
+    if (discoverApiKey) {
+      const auth = req.headers.authorization;
+      if (!auth || !auth.startsWith("Bearer ") || auth.slice(7) !== discoverApiKey) {
+        res.status(401).json({ error: "Invalid or missing discover API key" });
+        return;
+      }
+    }
+
     const { seedUrls } = req.body as { seedUrls?: string[] };
     logger.info(`[API] POST /jobs/discover (seedUrls=${seedUrls?.length ?? 'default (35)'})`);
     await log(`[API] POST /jobs/discover start`);

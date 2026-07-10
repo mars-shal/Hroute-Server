@@ -1,6 +1,7 @@
 import axios from "axios";
 import { log, logger } from "./logger.js";
 import { RedisModel } from "../model/redis.js";
+import { scrapePage, discoverPageLinks } from "./crawleeScraper.js";
 
 type ApiHandlerData = {
   method: string;
@@ -56,6 +57,13 @@ class Crawler {
       } else {
         await log(`[Crawler] fireScraper ${body_url} ERROR: ${e}`);
       }
+      // Fallback to Crawlee when Firecrawl fails
+      logger.info(`[Crawler] fireScraper fallback to Crawlee: ${body_url}`);
+      await log(`[Crawler] fireScraper fallback Crawlee: ${body_url}`);
+      const fallback = await scrapePage(body_url);
+      if (fallback) {
+        return { data: { markdown: fallback.markdown } };
+      }
       return null;
     }
   }
@@ -94,6 +102,13 @@ class Crawler {
         await log(`[Crawler] fireMap ${body_url} ERROR: ${detail}`);
       } else {
         await log(`[Crawler] fireMap ${body_url} ERROR: ${e}`);
+      }
+      // Fallback to Crawlee when Firecrawl fails
+      logger.info(`[Crawler] fireMap fallback to Crawlee: ${body_url}`);
+      await log(`[Crawler] fireMap fallback Crawlee: ${body_url}`);
+      const fallbackLinks = await discoverPageLinks(body_url);
+      if (fallbackLinks.length > 0) {
+        return { links: fallbackLinks };
       }
       return null;
     }
