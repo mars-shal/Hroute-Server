@@ -1,8 +1,11 @@
-import { CheerioCrawler, RequestQueue } from "@crawlee/cheerio";
+import axios from "axios";
+import * as cheerio from "cheerio";
 import { log, logger } from "./logger.js";
 
+const TIMEOUT = 30000;
+
 /**
- * Scrape a single page using Crawlee's CheerioCrawler.
+ * Scrape a single page using axios + cheerio.
  * Returns clean text content (not true markdown, but sufficient for LLM extraction).
  * Designed as a Firecrawl fallback — returns the same shape { markdown }.
  */
@@ -12,54 +15,37 @@ export async function scrapePage(
   logger.info(`[Crawlee] scrapePage entry: ${url}`);
   await log(`[Crawlee] scrapePage: ${url}`);
 
-  let result: string | null = null;
-
   try {
-    const requestQueue = await RequestQueue.open();
-    await requestQueue.addRequest({ url });
-
-    const crawler = new CheerioCrawler({
-      requestQueue,
-      maxRequestsPerCrawl: 1,
-      maxConcurrency: 1,
-      maxRequestRetries: 1,
-      useSessionPool: false,
-      autoscaledPoolOptions: {
-        maxConcurrency: 1,
-        minConcurrency: 1,
-      },
-      requestHandler: async ({ $ }) => {
-        // Remove non-content elements
-        $("script, style, nav, footer, header, aside, .sidebar, .menu, iframe").remove();
-        const text = $("body").text().replace(/\s+/g, " ").trim();
-        result = text;
-      },
-      failedRequestHandler: async ({ request }) => {
-        logger.error(`[Crawlee] scrapePage failed: ${request.url}`);
+    const res = await axios.get(url, {
+      timeout: TIMEOUT,
+      headers: {
+        "User-Agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
       },
     });
 
-    await crawler.run();
-    await requestQueue.drop();
+    const $ = cheerio.load(res.data);
+    $("script, style, nav, footer, header, aside, .sidebar, .menu, iframe").remove();
+    const text = $("body").text().replace(/\s+/g, " ").trim();
+
+    if (text) {
+      logger.info(`[Crawlee] scrapePage success: ${url} (${text.length} chars)`);
+      await log(`[Crawlee] scrapePage success: ${url} (${text.length} chars)`);
+      return { markdown: text };
+    }
+
+    logger.warn(`[Crawlee] scrapePage no content: ${url}`);
+    await log(`[Crawlee] scrapePage no content: ${url}`);
+    return null;
   } catch (e) {
     logger.error(`[Crawlee] scrapePage error ${url}:`, e);
-    await log(`[Crawlee] scrapePage ERROR: ${url} — ${e}`);
+    await log(`[Crawlee] scrapePage ERROR: ${url} — ${e instanceof Error ? e.message : e}`);
     return null;
   }
-
-  if (result) {
-    logger.info(`[Crawlee] scrapePage success: ${url} (${result.length} chars)`);
-    await log(`[Crawlee] scrapePage success: ${url} (${result.length} chars)`);
-    return { markdown: result };
-  }
-
-  logger.warn(`[Crawlee] scrapePage no content: ${url}`);
-  await log(`[Crawlee] scrapePage no content: ${url}`);
-  return null;
 }
 
 /**
- * Discover all links from a seed URL using Crawlee's CheerioCrawler.
+ * Discover all links from a seed URL using axios + cheerio.
  * Extracts all <a href> values from the page, resolving relative URLs.
  * Returns an array of absolute URL strings.
  */
@@ -70,46 +56,33 @@ export async function discoverPageLinks(seedUrl: string): Promise<string[]> {
   const links = new Set<string>();
 
   try {
-    const requestQueue = await RequestQueue.open();
-    await requestQueue.addRequest({ url: seedUrl });
-
-    const crawler = new CheerioCrawler({
-      requestQueue,
-      maxRequestsPerCrawl: 1,
-      maxConcurrency: 1,
-      maxRequestRetries: 1,
-      useSessionPool: false,
-      autoscaledPoolOptions: {
-        maxConcurrency: 1,
-        minConcurrency: 1,
-      },
-      requestHandler: async ({ $, request }) => {
-        $("a[href]").each((_, el) => {
-          const href = $(el).attr("href");
-          if (!href || href.startsWith("#") || href.startsWith("javascript:")) return;
-          try {
-            const absolute = new URL(href, request.url).href;
-            links.add(absolute);
-          } catch {
-            // Skip malformed URLs
-          }
-        });
-      },
-      failedRequestHandler: async ({ request }) => {
-        logger.error(`[Crawlee] discoverPageLinks failed: ${request.url}`);
+    const res = await axios.get(seedUrl, {
+      timeout: TIMEOUT,
+      headers: {
+        "User-Agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
       },
     });
 
-    await crawler.run();
-    await requestQueue.drop();
+    const $ = cheerio.load(res.data);
+    $("a[href]").each((_, el) => {
+      const href = $(el).attr("href");
+      if (!href || href.startsWith("#") || href.startsWith("javascript:")) return;
+      try {
+        const absolute = new URL(href, seedUrl).href;
+        links.add(absolute);
+      } catch {
+        // Skip malformed URLs
+      }
+    });
+
+    const result = Array.from(links);
+    logger.info(`[Crawlee] discoverPageLinks: ${result.length} links from ${seedUrl}`);
+    await log(`[Crawlee] discoverPageLinks: ${result.length} links from ${seedUrl}`);
+    return result;
   } catch (e) {
     logger.error(`[Crawlee] discoverPageLinks error ${seedUrl}:`, e);
-    await log(`[Crawlee] discoverPageLinks ERROR: ${seedUrl} — ${e}`);
+    await log(`[Crawlee] discoverPageLinks ERROR: ${seedUrl} — ${e instanceof Error ? e.message : e}`);
     return [];
   }
-
-  const result = Array.from(links);
-  logger.info(`[Crawlee] discoverPageLinks: ${result.length} links from ${seedUrl}`);
-  await log(`[Crawlee] discoverPageLinks: ${result.length} links from ${seedUrl}`);
-  return result;
 }
