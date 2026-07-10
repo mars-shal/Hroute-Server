@@ -138,7 +138,7 @@ Limits:
 - Run this first to populate the jobs table. Takes a while (rate-limited 5s between seeds).  
 - Returns immediately after completion (not streaming).  
 - **Auth**: If `DISCOVER_API_KEY` env var is set, requests must include `Authorization: Bearer <key>`.  
-- **Fallback**: Uses the Firecrawl API first; if it fails (rate-limit, credits exhausted), automatically falls back to Crawlee (CheerioCrawler) for both page scraping and link discovery.  
+- **Fallback tiers**: Firecrawl API → Crawlee (CheerioCrawler `<a>` scraping) → Apify Sitemap URL Finder (requires `APIFY_API_TOKEN`). Page scraping (Firecrawl → Crawlee) and link discovery use separate fallback chains.  
 - **Render deployment**: Discovery can exceed Vercel's 30s timeout. Deploy this same codebase on Render with `DISCOVER_API_KEY` set and no `VERCEL` env var to run discovery jobs without timeouts.
 
 ```json

@@ -2,6 +2,7 @@ import axios from "axios";
 import { log, logger } from "./logger.js";
 import { RedisModel } from "../model/redis.js";
 import { scrapePage, discoverPageLinks } from "./crawleeScraper.js";
+import { discoverSitemapUrls } from "./sitemapDiscoverer.js";
 
 type ApiHandlerData = {
   method: string;
@@ -103,12 +104,20 @@ class Crawler {
       } else {
         await log(`[Crawler] fireMap ${body_url} ERROR: ${e}`);
       }
-      // Fallback to Crawlee when Firecrawl fails
+      // Tier 2: Crawlee <a> scraping fallback
       logger.info(`[Crawler] fireMap fallback to Crawlee: ${body_url}`);
       await log(`[Crawler] fireMap fallback Crawlee: ${body_url}`);
       const fallbackLinks = await discoverPageLinks(body_url);
       if (fallbackLinks.length > 0) {
         return { links: fallbackLinks };
+      }
+
+      // Tier 3: Apify sitemap discovery (requires APIFY_API_TOKEN)
+      logger.info(`[Crawler] fireMap fallback to Apify sitemap: ${body_url}`);
+      await log(`[Crawler] fireMap fallback Apify: ${body_url}`);
+      const sitemapUrls = await discoverSitemapUrls(body_url);
+      if (sitemapUrls.length > 0) {
+        return { links: sitemapUrls };
       }
       return null;
     }
