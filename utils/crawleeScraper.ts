@@ -4,6 +4,19 @@ import { log, logger } from "./logger.js";
 
 const TIMEOUT = 30000;
 
+/** URL path patterns that are ad/tracking links, not job pages */
+const SKIP_LINK_PATTERNS = [
+  "/listing_ads/",
+  "/click",
+  "/goto/",
+  "/track",
+  "?pk=",
+  "&pk=",
+  "/outbound",
+  "sponsor",
+  "/banner",
+];
+
 /**
  * Scrape a single page using axios + cheerio.
  * Returns clean text content (not true markdown, but sufficient for LLM extraction).
@@ -14,6 +27,13 @@ export async function scrapePage(
 ): Promise<{ markdown: string } | null> {
   logger.info(`[Crawlee] scrapePage entry: ${url}`);
   await log(`[Crawlee] scrapePage: ${url}`);
+
+  // Skip ad/tracking URLs before making any request
+  const isAd = SKIP_LINK_PATTERNS.some((p) => url.includes(p));
+  if (isAd) {
+    logger.info(`[Crawlee] scrapePage skip (ad/tracking): ${url}`);
+    return null;
+  }
 
   try {
     const res = await axios.get(url, {
@@ -70,6 +90,8 @@ export async function discoverPageLinks(seedUrl: string): Promise<string[]> {
       if (!href || href.startsWith("#") || href.startsWith("javascript:")) return;
       try {
         const absolute = new URL(href, seedUrl).href;
+        const isAd = SKIP_LINK_PATTERNS.some((p) => absolute.includes(p));
+        if (isAd) return;
         links.add(absolute);
       } catch {
         // Skip malformed URLs
