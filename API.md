@@ -1,6 +1,7 @@
 # hrout API — Frontend TL;DR
 
 **Base URL**: `https://hroute-server.onrender.com/api`  
+**WebSocket URL**: `wss://hroute-server.onrender.com/api/ws/jobs`  
 **Auth**: `Authorization: Bearer <access_token>` (required on protected routes)
 
 ---
@@ -27,6 +28,7 @@ No auth required.
 | POST   | `/auth/register` | No    | `{ "email": string, "password": string }`      | `{ "status": 200, "access_token": string, "refresh_token": string }`    |
 | POST   | `/auth/login`    | No    | `{ "email": string, "password": string }`      | `{ "status": 200, "access_token": string, "refresh_token": string }`    |
 | POST   | `/auth/refresh`  | No    | `{ "refresh_token": string }`                  | `{ "status": 200, "access_token": string, "expires_in": number }`       |
+| POST   | `/auth/logout`   | Bearer | —                                               | `{ "status": 200, "message": "Logged out" }`                            |
 | GET    | `/auth/me`       | Bearer | —                                               | `{ "status": 200, "user": UserProfile }`                                |
 | PUT    | `/auth/profile`  | Bearer | `{ "display_name"?: string, "skills"?: string[], … }` | `{ "status": 200, "message": "Profile updated" }`                 |
 | PUT    | `/auth/password` | Bearer | `{ "current_password": string, "new_password": string }` | `{ "status": 200, "message": "Password updated" }`               |
@@ -59,6 +61,42 @@ No auth required.
 
 ---
 
+## Chat — `/api/chat`
+
+| Method | Path | Auth | Request Body | Response |
+|--------|------|------|--------------|----------|
+| POST | `/chat` | Bearer | `{ "message": string, "system"?: string }` | `{ "status": 200, "reply": string }` |
+
+Use this for the in-app assistant. It reuses the backend Groq/LLM wrapper and requires a valid access token.
+
+Request:
+```json
+{
+  "message": "Help me improve my resume for frontend roles"
+}
+```
+
+Optional `system` can override the default assistant behavior for a specific frontend flow.
+
+Success:
+```json
+{
+  "status": 200,
+  "reply": "..."
+}
+```
+
+Errors:
+- `401` if `Authorization` is missing or invalid
+- `400` if `message` is missing
+- `500` if the LLM call fails or is rate-limited
+
+Limits:
+- `message` is trimmed and capped server-side at **4,000 characters**.
+- The response is capped by the backend at roughly **700 tokens**.
+
+---
+
 ## Jobs — `/api/jobs/`
 
 | Method | Path             | Auth    | Request Body                        | Response (success)                  |
@@ -82,10 +120,23 @@ No auth required.
 }
 ```
 
-**search** (semantic)  
+**search** (semantic, cached + reranked)  
 - Uses the authenticated user's `resume_embedding` to find similar jobs via cosine similarity (threshold 0.5).  
-- Returns up to 20 ranked matches.  
+- Pulls 50–100 vector candidates, reranks them with profile/business signals, caches the final payload for 10 minutes, and returns up to `limit` matches.  
+- Cache key includes user id, `resume_version`, `jobs:index_version`, and a stable filter hash.  
 - Returns 400 if no resume embedding exists ("No resume embedding found").
+
+Optional request body:
+
+```json
+{
+  "limit": 20,
+  "location": "Lagos",
+  "remote": true,
+  "role": "Frontend Developer",
+  "salary_target": "₦400k"
+}
+```
 
 ```json
 {
@@ -103,12 +154,133 @@ No auth required.
       "apply_url": "https://…",
       "source_site": "linkedin.com",
       "posted_date": "2026-07-01",
+      "logo_url": "https://...",
+      "score": 0.89,
       "similarity": 0.87,
-      "missing_skills": ["Playwright"]
+      "matched_skills": ["React", "TypeScript"],
+      "missing_skills": ["Playwright"],
+      "rank_reasons": ["skill match", "work style match", "recent posting"]
+    }
+  ],
+  "source": "cache",
+  "generated_at": "2026-07-10T12:00:00.000Z"
+}
+```
+
+---
+
+## Jobs WebSocket — `/api/ws/jobs`
+
+Use this when the user is actively on the job matches page and you want progress events plus cached results. The socket authenticates first; it does **not** compute on connection.
+
+Connect with either query auth:
+
+```txt
+wss://hroute-server.onrender.com/api/ws/jobs?token=<access_token>
+```
+
+or send an auth message first:
+
+```json
+{ "type": "auth", "token": "access_token" }
+```
+
+Auth success:
+
+```json
+{ "type": "auth.ok" }
+```
+
+Request matches:
+
+```json
+{
+  "type": "jobs.match.request",
+  "request_id": "req_123",
+  "filters": {
+    "limit": 20,
+    "location": "Lagos",
+    "remote": true,
+    "role": "Frontend Developer"
+  }
+}
+```
+
+Server events:
+
+```json
+{ "type": "jobs.match.accepted", "request_id": "req_123" }
+```
+
+```json
+{
+  "type": "jobs.match.progress",
+  "request_id": "req_123",
+  "stage": "vector_search",
+  "message": "Searching jobs"
+}
+```
+
+Cache hit notice:
+
+```json
+{
+  "type": "jobs.match.cache_hit",
+  "request_id": "req_123",
+  "generated_at": "2026-07-10T12:00:00.000Z"
+}
+```
+
+Final results:
+
+```json
+{
+  "type": "jobs.match.results",
+  "request_id": "req_123",
+  "source": "cache",
+  "generated_at": "2026-07-10T12:00:00.000Z",
+  "results": [
+    {
+      "job_id": "uuid",
+      "title": "Frontend Developer",
+      "company": "Paystack",
+      "score": 0.89,
+      "similarity": 0.87,
+      "matched_skills": ["React", "TypeScript"],
+      "missing_skills": ["Playwright"],
+      "rank_reasons": ["skill match", "work style match"]
     }
   ]
 }
 ```
+
+Error:
+
+```json
+{
+  "type": "jobs.match.error",
+  "request_id": "req_123",
+  "code": "MATCH_FAILED",
+  "message": "No resume embedding found. Upload your resume and try again."
+}
+```
+
+Heartbeat:
+
+```json
+{ "type": "ping", "timestamp": 1783603200000 }
+```
+
+```json
+{ "type": "pong", "timestamp": 1783603200000 }
+```
+
+Cache behavior:
+- match results cache TTL: **600 seconds**
+- active WS connection key TTL: **60 seconds**, refreshed by heartbeat
+- resume uploads bump `resume_version`
+- job ingestion bumps `jobs:index_version`
+- different filters produce different cache keys
 
 **recent**  
 - Returns the last 50 jobs ordered by `crawled_at DESC`.  
@@ -142,17 +314,25 @@ No auth required.
 
 | Method | Path | Auth | Body | Returns |
 |--------|------|------|------|---------|
-| POST | `/api/resume/upload` | Bearer | `{ resume_text }` or `{ file_data, file_type }` | `{ profile }` |
+| POST | `/resume/upload` | Bearer | `{ resume_text }` or `{ file_data, file_type }` | `{ profile }` |
+| GET | `/resume/file` | Bearer | — | `{ status: 200, url: string }` |
 
 **`resume_text`**: raw text extracted by the frontend (easiest).  
 **`file_data` + `file_type`**: base64-encoded file content + `"pdf"` or `"txt"`. Server extracts text server-side.
+Upload cap: **2 MB raw file size**. Larger uploads return `413 Payload Too Large`.
+
+The backend keeps base64 as a temporary transport format only. For file uploads, it decodes the base64, uploads the raw file to Supabase Storage, then extracts bounded text for profile/embedding work.
 
 Pipeline on upload:
-1. Extract text (from body or PDF parse)
-2. LLM extracts structured data: skills, experience_years, top_roles, locations_preferred, remote_preference
-3. Saves everything to the user's profile
-4. Generates a resume embedding (384-dim) for semantic job search
-5. Returns the structured profile
+1. Reject files above 2 MB before processing
+2. Upload the raw file to Supabase Storage when `file_data` is provided
+3. Extract bounded text (PDF via server parser or plain text)
+4. Truncate resume text before LLM/profile processing
+5. LLM extracts structured profile data
+6. Saves profile fields and `resume_file_type`
+7. Generates a resume embedding (384-dim) for semantic job search
+8. Bumps `resume_version`
+9. Returns the structured profile
 
 ```json
 {
@@ -166,10 +346,26 @@ Pipeline on upload:
     "experience": "1 year",
     "experience_hint": "incl. 2 internships",
     "salary_target": "₦400k – ₦700k / mo",
-    "skills": ["TypeScript", "React", "Go"]
+    "skills": ["TypeScript", "React", "Go"],
+    "resume_file_type": "pdf"
   }
 }
 ```
+
+**Get uploaded resume file**
+
+`GET /api/resume/file` returns a signed URL for the authenticated user's uploaded resume file. Do not store this URL permanently on the frontend; request a fresh one when the user needs to view/download the file.
+
+```json
+{
+  "status": 200,
+  "url": "https://...signed-url..."
+}
+```
+
+Errors:
+- `401` if auth is missing/invalid
+- `404` if the user has no uploaded resume file
 
 After upload, the user's profile is fully populated. `GET /auth/me` will include all these fields, and `POST /jobs/search` will work (it needs the resume embedding). Mapped to UI:
 
@@ -208,9 +404,25 @@ interface UserProfile {
   display_name?: string;
   avatar_url?: string;
   timezone?: string;
+  headline?: string;
+  location?: string;
+  role?: string;
+  work_style?: string;
+  work_style_hint?: string;
+  experience?: string;
+  experience_hint?: string;
+  salary_target?: string;
   created_at?: string;
   skills?: string[];
   resume_text?: string;
+  resume_file_type?: "pdf" | "txt";
+  resume_version?: string;
+}
+
+interface ChatResponse {
+  status: number;
+  reply?: string;
+  error?: string;
 }
 
 // ── Jobs ──
@@ -232,13 +444,12 @@ interface JobRecord extends StructuredJob {
   id: string;
   source_url: string;
   crawled_at: string;
-  /** ⚠️ Present in the DB schema and returned by match_jobs() / GET /jobs/recent,
-   *  but absent from the TS StructuredJob/JobRecord interfaces. */
   logo_url?: string | null;
 }
 
 interface MatchResult {
-  job_id: string;
+  id?: string;
+  job_id?: string;
   title: string;
   company: string;
   location?: string;
@@ -249,8 +460,13 @@ interface MatchResult {
   apply_url?: string | null;
   source_site?: string;
   posted_date?: string | null;
+  logo_url?: string | null;
+  crawled_at?: string;
+  score?: number;
   similarity: number;
+  matched_skills?: string[];
   missing_skills: string[];
+  rank_reasons?: string[];
 }
 
 // ── Applications ──
@@ -309,6 +525,27 @@ async function searchJobs() {
   return res.json(); // { status, jobs: [...], error? }
 }
 
+// 4. Chat assistant (auth required)
+async function chat(message) {
+  const res = await fetch(`${BASE}/chat`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${token}`,
+    },
+    body: JSON.stringify({ message }),
+  });
+  return res.json(); // { status, reply?, error? }
+}
+
+// 5. Resume signed URL (auth required)
+async function getResumeFileUrl() {
+  const res = await fetch(`${BASE}/resume/file`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  return res.json(); // { status, url?, error? }
+}
+
 // Example usage
 async function main() {
   await login("user@example.com", "password123");
@@ -316,6 +553,8 @@ async function main() {
   console.log(`${recent.length} recent jobs`);
   const matches = await searchJobs();
   console.log(`${matches.jobs.length} matching jobs`);
+  const assistant = await chat("How can I improve my profile?");
+  console.log(assistant.reply);
 }
 
 main().catch(console.error);
@@ -327,5 +566,6 @@ main().catch(console.error);
 
 - All routes are prefixed with `/api` (so full path is e.g. `POST /api/auth/login`).  
 - Use `import type { UserProfile, StructuredJob, JobRecord, MatchResult, Application }` from `model/model.ts` for the canonical TS types.  
-- The `logo_url` column exists in the `jobs` SQL table and is returned by `match_jobs()` and `GET /jobs/recent`, but it's **not** in the TS `StructuredJob` or `JobRecord` interfaces. Handle it as `string | null` when reading from the API.  
+- `logo_url` is returned by `match_jobs()` and `GET /jobs/recent`; handle it as `string | null`.  
+- Uploaded resume files are private. Use `GET /api/resume/file` to request a temporary signed URL instead of storing a permanent URL.  
 - To populate the jobs table for the first time, call `POST /api/jobs/discover` once. It crawls 35 seed URLs and can take several minutes.

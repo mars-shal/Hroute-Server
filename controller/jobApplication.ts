@@ -2,6 +2,8 @@ import { Crawler } from "../utils/crawler";
 import { EmbeddingService } from "../utils/embedding";
 import { LLM } from "../model/LLM";
 import type { Database } from "../model/database";
+import { JobMatcher } from "./jobMatcher";
+import type { MatchFilters, MatchProgressHandler } from "./jobMatcher";
 import { log, logger } from "../utils/logger";
 import { SEARCHURLS } from "../utils/search";
 
@@ -24,11 +26,13 @@ class JobApplicationController {
   private crawler: Crawler;
   private llm: LLM;
   private db: Database;
+  private matcher: JobMatcher;
 
   constructor(db: Database) {
     this.crawler = new Crawler();
     this.llm = new LLM();
     this.db = db;
+    this.matcher = new JobMatcher(db);
   }
 
   async Discover(seedUrls?: string[]): Promise<DiscoverResult> {
@@ -106,10 +110,11 @@ class JobApplicationController {
                 : (storedJob as { id: string } | undefined)?.id;
 
             if (jobId) {
-              const description = job.description ?? "";
+              const description = typeof job.description === "string" ? job.description : "";
               if (description.length > 20) {
                 const vector = await embeddingService.embed(description);
                 await this.db.storeJobVector(jobId, vector);
+                await this.matcher.bumpJobsIndexVersion();
               }
               totalJobs++;
               seedJobs++;
@@ -142,32 +147,31 @@ class JobApplicationController {
 
   async Search(
     token: string,
-    limit: number = 20,
+    filters: MatchFilters = {},
+    onProgress?: MatchProgressHandler,
   ): Promise<{
     status: number;
     jobs: Record<string, unknown>[];
+    source?: string;
+    generated_at?: string;
+    cache_key?: string;
     error?: string;
   }> {
-    logger.info(`[Search] entry (limit=${limit})`);
+    logger.info(`[Search] entry (limit=${filters.limit ?? 20})`);
 
     try {
-      const embedding = await this.db.getResumeEmbedding(token);
-      if (!embedding || embedding.length === 0) {
-        logger.warn(`[Search] No resume embedding found for token ${token.slice(0, 12)}...`);
-        return {
-          status: 400,
-          jobs: [],
-          error:
-            "No resume embedding found. Upload your resume and try again.",
-        };
-      }
-
-      const result = await this.db.searchJobsByEmbedding(embedding, 0.5, limit);
-      const jobs = (result.data as Record<string, unknown>[]) ?? [];
-
-      logger.info(`[Search] found ${jobs.length} matching jobs`);
+      const result = await this.matcher.match(token, filters, onProgress);
+      const jobs = result.jobs as Record<string, unknown>[];
+      logger.info(`[Search] found ${jobs.length} matching jobs (${result.source ?? 'none'})`);
       await log(`[Search] ${jobs.length} results for token ${token.slice(0, 12)}...`);
-      return { status: 200, jobs };
+      return {
+        status: result.status,
+        jobs,
+        source: result.source,
+        generated_at: result.generated_at,
+        cache_key: result.cache_key,
+        error: result.error,
+      };
     } catch (e) {
       logger.error(`[Search] Error: ${e}`);
       await log(`[Search] ERROR: ${e}`);

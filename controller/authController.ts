@@ -103,6 +103,8 @@ class AuthController {
             salary_target: result.salary_target,
             skills: result.skills,
             resume_text: result.resume_text,
+            resume_file_type: result.resume_file_type,
+            resume_version: result.resume_version,
             created_at: result.created_at,
           },
         };

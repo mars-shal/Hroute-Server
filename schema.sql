@@ -96,8 +96,13 @@ create table if not exists public.profiles (
   skills            jsonb default '[]'::jsonb,
   resume_text       text,
   resume_embedding  vector(384),
+  resume_file_type  text,
+  resume_version    timestamptz,
   created_at        timestamptz default now()
 );
+
+alter table public.profiles add column if not exists resume_file_type text;
+alter table public.profiles add column if not exists resume_version timestamptz;
 
 alter table public.profiles enable row level security;
 

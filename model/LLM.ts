@@ -71,9 +71,9 @@ class LLM {
     const seconds = msg.match(/([\d.]+)s/);
     if (hours || minutes || seconds) {
       let total = 0;
-      if (hours) total += parseInt(hours[1]) * 3600;
-      if (minutes) total += parseInt(minutes[1]) * 60;
-      if (seconds) total += Math.ceil(parseFloat(seconds[1]));
+      if (hours?.[1]) total += parseInt(hours[1]) * 3600;
+      if (minutes?.[1]) total += parseInt(minutes[1]) * 60;
+      if (seconds?.[1]) total += Math.ceil(parseFloat(seconds[1]));
       return total;
     }
     return null;

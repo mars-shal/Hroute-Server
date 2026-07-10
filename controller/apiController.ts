@@ -2,6 +2,7 @@ import { Router } from "express";
 import type { Request, Response } from "express";
 import type { Database } from "../model/database";
 import { AuthController } from "./authController";
+import { ChatController } from "./chatController";
 import { JobApplicationController } from "./jobApplication";
 import { ResumeController } from "./resumeController";
 import { log, logger } from "../utils/logger";
@@ -9,6 +10,7 @@ import { log, logger } from "../utils/logger";
 export function createApiRouter(db: Database): Router {
   const router = Router();
   const auth = new AuthController(db);
+  const chat = new ChatController(db);
   const jobs = new JobApplicationController(db);
   const resume = new ResumeController(db);
 
@@ -160,6 +162,24 @@ export function createApiRouter(db: Database): Router {
     }
   });
 
+  router.post("/chat", async (req: Request, res: Response) => {
+    logger.info(`[API] POST /chat`);
+    try {
+      const token = extractToken(req);
+      if (!token) {
+        res.status(401).json({ error: "Missing Authorization header" });
+        return;
+      }
+
+      const result = await chat.Chat(token, req.body as { message?: string; system?: string });
+      logger.info(`[API] POST /chat → ${result.status}`);
+      res.status(result.status).json(result);
+    } catch (e) {
+      logger.error("[POST /chat]", e);
+      res.status(500).json({ error: String(e) });
+    }
+  });
+
   // ── Job routes ───────────────────────────────────────────────
 
   router.post("/jobs/discover", async (req: Request, res: Response) => {
@@ -189,7 +209,7 @@ export function createApiRouter(db: Database): Router {
         res.status(401).json({ error: "Missing Authorization header" });
         return;
       }
-      const result = await jobs.Search(token);
+      const result = await jobs.Search(token, req.body ?? {});
       logger.info(`[API] POST /jobs/search → ${result.status} (${result.jobs.length} jobs)`);
       res.json(result);
     } catch (e) {
@@ -213,6 +233,23 @@ export function createApiRouter(db: Database): Router {
       res.status(result.status).json(result);
     } catch (e) {
       logger.error("[POST /resume/upload]", e);
+      res.status(500).json({ error: String(e) });
+    }
+  });
+
+  router.get("/resume/file", async (req: Request, res: Response) => {
+    logger.info(`[API] GET /resume/file`);
+    try {
+      const token = extractToken(req);
+      if (!token) {
+        res.status(401).json({ error: "Missing Authorization header" });
+        return;
+      }
+      const result = await resume.getFile(token);
+      logger.info(`[API] GET /resume/file → ${result.status}`);
+      res.status(result.status).json(result);
+    } catch (e) {
+      logger.error("[GET /resume/file]", e);
       res.status(500).json({ error: String(e) });
     }
   });

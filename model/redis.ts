@@ -73,6 +73,17 @@ class RedisModel {
     }
   }
 
+  async increment(key: string): Promise<number | null> {
+    try {
+      const value = await this.client.incr(key);
+      logger.info(`[Redis] incr ${key}: ${value}`);
+      return value;
+    } catch (e) {
+      logger.error(`[Redis] incr ${key}:`, e);
+      return null;
+    }
+  }
+
   // ── Sorted Sets ─────────────────────────────────────────────
 
   async zadd(payload: RedisZAddPayload): Promise<boolean> {

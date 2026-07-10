@@ -43,9 +43,19 @@ export const UserProfileSchema = Type.Object({
   display_name: Type.Optional(Type.String()),
   avatar_url: Type.Optional(Type.String()),
   timezone: Type.Optional(Type.String()),
+  headline: Type.Optional(Type.String()),
+  location: Type.Optional(Type.String()),
+  role: Type.Optional(Type.String()),
+  work_style: Type.Optional(Type.String()),
+  work_style_hint: Type.Optional(Type.String()),
+  experience: Type.Optional(Type.String()),
+  experience_hint: Type.Optional(Type.String()),
+  salary_target: Type.Optional(Type.String()),
   created_at: Type.Optional(Type.String()),
   skills: Type.Optional(Type.Array(Type.String())),
   resume_text: Type.Optional(Type.String()),
+  resume_file_type: Type.Optional(Type.String()),
+  resume_version: Type.Optional(Type.String()),
 });
 export type UserProfile = Static<typeof UserProfileSchema>;
 
@@ -134,8 +144,13 @@ export const MatchResultSchema = Type.Object({
   apply_url: Type.Optional(Type.Union([Type.String(), Type.Null()])),
   source_site: Type.Optional(Type.String()),
   posted_date: Type.Optional(Type.Union([Type.String(), Type.Null()])),
+  logo_url: Type.Optional(Type.Union([Type.String(), Type.Null()])),
+  crawled_at: Type.Optional(Type.String()),
+  score: Type.Number(),
   similarity: Type.Number(),
+  matched_skills: Type.Array(Type.String()),
   missing_skills: Type.Array(Type.String()),
+  rank_reasons: Type.Array(Type.String()),
 });
 export type MatchResult = Static<typeof MatchResultSchema>;
 

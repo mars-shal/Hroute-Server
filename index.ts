@@ -1,13 +1,15 @@
 import express from "express";
+import { createServer } from "http";
 import type { Request, Response } from "express";
 import { connectDatabase } from "./model/database";
 import { createApiRouter } from "./controller/apiController";
+import { attachJobsWebSocket } from "./controller/jobsWsController";
 import { log, logger } from "./utils/logger";
 
 const app = express();
 const port = parseInt(process.env.PORT || "8080", 10);
 
-app.use(express.json({ limit: "10mb" }));
+app.use(express.json({ limit: "3mb" }));
 
 app.use((_req, res, next) => {
   res.header("Access-Control-Allow-Origin", "*");
@@ -24,8 +26,10 @@ app.get("/ping", (_req: Request, res: Response) => {
 async function init() {
   const db = await connectDatabase();
   app.use("/api", createApiRouter(db));
+  const server = createServer(app);
+  attachJobsWebSocket(server, db);
 
-  app.listen(port, () => {
+  server.listen(port, () => {
     logger.info(`hrout server listening on port ${port}`);
     log(`[Server] Started on port ${port}`);
   });

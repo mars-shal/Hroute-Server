@@ -59,6 +59,15 @@ class Database {
     }
   }
 
+  async authenticateToken(token: string): Promise<ApiResponse & { userId?: string }> {
+    const claims = await this.verifyToken(token);
+    if (!claims) {
+      return { status: 401, response: 'Invalid token' };
+    }
+
+    return { status: 200, userId: claims.sub };
+  }
+
   // ── File storage ──────────────────────────────────────────────
 
   async getFile(token: string, folder: string, fileName: string): Promise<ApiResponse> {
@@ -143,6 +152,69 @@ class Database {
     } catch (e) {
       logger.error(`[deleteFile] Error: ${e}`);
       return { response: String(e), status: 500 };
+    }
+  }
+
+  async uploadResumeFile(token: string, buffer: Uint8Array, fileType: string): Promise<ApiResponse> {
+    const claims = await this.verifyToken(token);
+    if (!claims) return { success: false, response: 'Invalid token', status: 401 };
+
+    try {
+      const userId = claims.sub;
+      if (!userId) return { status: 401, response: 'User ID not found' };
+
+      const fileName = `resume.${fileType === 'pdf' ? 'pdf' : 'txt'}`;
+      const filePath = `${userId}/resumes/${fileName}`;
+      const contentType = fileName.endsWith('.pdf') ? 'application/pdf' : 'text/plain';
+      logger.info(`[uploadResumeFile] Uploading ${filePath} (${buffer.length} bytes)`);
+
+      const { error } = await this.supabase.storage
+        .from('user-data')
+        .upload(filePath, buffer, { contentType, upsert: true });
+
+      if (error) throw error;
+
+      logger.info(`[uploadResumeFile] Uploaded ${filePath}`);
+      await log(`[uploadResumeFile] success: ${filePath}`);
+      return { status: 200 };
+    } catch (e) {
+      logger.error(`[uploadResumeFile] Error: ${e}`);
+      await log(`[uploadResumeFile] ERROR: ${e}`);
+      return { status: 500, response: String(e) };
+    }
+  }
+
+  async getResumeSignedUrl(token: string): Promise<ApiResponse & { url?: string }> {
+    const claims = await this.verifyToken(token);
+    if (!claims) return { success: false, response: 'Invalid token', status: 401 };
+
+    try {
+      const userId = claims.sub;
+      if (!userId) return { status: 401, response: 'User ID not found' };
+
+      const { data: profile, error: profileError } = await this.supabase
+        .from('profiles')
+        .select('resume_file_type')
+        .eq('id', userId)
+        .maybeSingle();
+
+      if (profileError) throw profileError;
+
+      const fileType = profile?.resume_file_type;
+      if (typeof fileType !== 'string' || (fileType !== 'pdf' && fileType !== 'txt')) {
+        return { status: 404, response: 'Resume file not found' };
+      }
+
+      const filePath = `${userId}/resumes/resume.${fileType}`;
+      const { data, error } = await this.supabase.storage
+        .from('user-data')
+        .createSignedUrl(filePath, 3600);
+
+      if (error) throw error;
+      return { status: 200, url: data.signedUrl };
+    } catch (e) {
+      logger.error(`[getResumeSignedUrl] Error: ${e}`);
+      return { status: 500, response: String(e) };
     }
   }
 
@@ -343,6 +415,8 @@ class Database {
         salary_target: profileData.salary_target ?? null,
         skills: profileData.skills ?? null,
         resume_text: profileData.resume_text ?? null,
+        resume_file_type: profileData.resume_file_type ?? null,
+        resume_version: profileData.resume_version ?? null,
         created_at: profileData.created_at ?? null,
         status: 200,
       };
@@ -458,7 +532,7 @@ class Database {
     try {
       const { error } = await this.supabase
         .from('job_vectors')
-        .insert({ job_id: jobId, embedding });
+        .upsert({ job_id: jobId, embedding }, { onConflict: 'job_id' });
 
       if (error) throw error;
       logger.info(`[storeJobVector] Stored vector for job ${jobId} (dim=${embedding.length})`);
@@ -629,10 +703,11 @@ class Database {
 
     try {
       const userId = claims.sub;
+      const resumeVersion = new Date().toISOString();
       logger.info(`[saveResumeEmbedding] Saving for user ${userId} (dim=${embedding.length})`);
       const { error } = await this.supabase
         .from('profiles')
-        .upsert({ id: userId, resume_embedding: embedding });
+        .upsert({ id: userId, resume_embedding: embedding, resume_version: resumeVersion });
 
       if (error) throw error;
       logger.info(`[saveResumeEmbedding] Done for user ${userId}`);
