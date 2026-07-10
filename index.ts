@@ -1,44 +1,43 @@
-import express from "express";
-import { createServer } from "http";
-import type { Request, Response } from "express";
 import { connectDatabase } from "./model/database.js";
-import { createApiRouter } from "./controller/apiController.js";
-import { attachJobsWebSocket } from "./controller/jobsWsController.js";
+import { createApp, createHttpServer } from "./app.js";
 import { log, logger } from "./utils/logger.js";
 
-const app = express();
-const port = parseInt(process.env.PORT || "8080", 10);
+const port = parseInt(process.env.PORT || "8082", 10);
 
-app.use(express.json({ limit: "3mb" }));
+let dbPromise: ReturnType<typeof connectDatabase> | null = null;
 
-app.use((_req, res, next) => {
-  res.header("Access-Control-Allow-Origin", "*");
-  res.header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
-  res.header("Access-Control-Allow-Headers", "Content-Type, Authorization");
-  if (_req.method === "OPTIONS") return res.sendStatus(204);
-  next();
-});
+function getDatabase() {
+  dbPromise ??= connectDatabase();
+  return dbPromise;
+}
 
-app.get("/ping", (_req: Request, res: Response) => {
-  res.json({ status: "ok", timestamp: new Date().toISOString() });
-});
+const lazyDb = new Proxy({} as Awaited<ReturnType<typeof connectDatabase>>, {
+  get(_target, prop) {
+    if (prop === "then" || typeof prop !== "string") {
+      return undefined;
+    }
 
-async function init() {
-  const db = await connectDatabase();
-  app.use("/api", createApiRouter(db));
-  const server = createServer(app);
-  attachJobsWebSocket(server, db);
+    return async (...args: unknown[]) => {
+      const db = await getDatabase();
+      const value = (db as unknown as Record<string, unknown>)[prop];
 
+      if (typeof value !== "function") {
+        throw new Error(`Database method ${prop} is not available`);
+      }
+
+      return Reflect.apply(value as (...inner: unknown[]) => unknown, db, args);
+    };
+  },
+}) as Awaited<ReturnType<typeof connectDatabase>>;
+
+const app = createApp(lazyDb);
+
+if (!process.env.VERCEL) {
+  const server = createHttpServer(lazyDb);
   server.listen(port, () => {
     logger.info(`hrout server listening on port ${port}`);
     log(`[Server] Started on port ${port}`);
   });
 }
-
-init().catch((e) => {
-  logger.error("Failed to start server:", e);
-  log(`[Server] Failed to start: ${e}`);
-  process.exit(1);
-});
 
 export default app;
