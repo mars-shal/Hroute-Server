@@ -156,6 +156,10 @@ class Crawler {
 
   // Scrape actual page content (markdown) for a list of URLs.
   // Returns { url, markdown } pairs so callers can reference the source URL.
+  async clearScrapedUrls(): Promise<void> {
+    await this.redis.delete("scraped_urls");
+  }
+
   async scrapePages(
     urls: string[],
   ): Promise<Array<{ url: string; markdown: string }>> {

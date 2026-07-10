@@ -137,6 +137,11 @@ class JobApplicationController {
       }
     }
 
+    // Clear scraped_urls set so next discovery re-scrapes all URLs fresh
+    await this.crawler.clearScrapedUrls();
+    logger.info(`[Discover] Cleared scraped_urls from Redis`);
+    await log(`[Discover] Cleared scraped_urls from Redis`);
+
     return {
       status: 200,
       message: `Discovery complete. Found ${totalJobs} jobs.`,
