@@ -128,7 +128,7 @@ Limits:
 
 | Method | Path             | Auth    | Request Body                        | Response (success)                  |
 |--------|------------------|---------|-------------------------------------|-------------------------------------|
-| POST   | `/jobs/discover` | No      | `{ "seedUrls"?: string[] }`         | `DiscoverResult`                    |
+| POST   | `/jobs/discover` | Bearer (if `DISCOVER_API_KEY` set) | `{ "seedUrls"?: string[] }`         | `DiscoverResult`                    |
 | POST   | `/jobs/search`   | Bearer  | —                                   | `{ "status": 200, "jobs": MatchResult[] }` |
 | GET    | `/jobs/recent`   | No      | —                                   | `JobRecord[]` (array, not wrapped)  |
 
@@ -136,7 +136,10 @@ Limits:
 - Crawls job listing pages, extracts structured job data via LLM, stores in DB.  
 - Default seed URLs from `SEARCHURLS` (35 sources) when `seedUrls` is omitted.  
 - Run this first to populate the jobs table. Takes a while (rate-limited 5s between seeds).  
-- Returns immediately after completion (not streaming).
+- Returns immediately after completion (not streaming).  
+- **Auth**: If `DISCOVER_API_KEY` env var is set, requests must include `Authorization: Bearer <key>`.  
+- **Fallback**: Uses the Firecrawl API first; if it fails (rate-limit, credits exhausted), automatically falls back to Crawlee (CheerioCrawler) for both page scraping and link discovery.  
+- **Render deployment**: Discovery can exceed Vercel's 30s timeout. Deploy this same codebase on Render with `DISCOVER_API_KEY` set and no `VERCEL` env var to run discovery jobs without timeouts.
 
 ```json
 {
