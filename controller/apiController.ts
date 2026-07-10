@@ -200,7 +200,7 @@ export function createApiRouter(db: DatabaseLike, deps: ApiControllerDeps = {}):
       }
     }
 
-    const { seedUrls } = req.body as { seedUrls?: string[] };
+    const { seedUrls } = (req.body ?? {}) as { seedUrls?: string[] };
     logger.info(`[API] POST /jobs/discover (seedUrls=${seedUrls?.length ?? 'default (35)'})`);
     await log(`[API] POST /jobs/discover start`);
     try {
