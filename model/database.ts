@@ -6,9 +6,9 @@ import type {
   UpdatePassword,
   UploadModel,
   ApiResponse,
-} from './model';
+} from './model.js';
 
-import { log, logger } from '../utils/logger';
+import { log, logger } from '../utils/logger.js';
 
 // In the Python version, @authVerify wraps methods to inject
 // `claims = {"sub": user.id}` after verifying the JWT token.

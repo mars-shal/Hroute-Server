@@ -1,6 +1,6 @@
 import axios from "axios";
-import { log, logger } from "./logger";
-import { RedisModel } from "../model/redis";
+import { log, logger } from "./logger.js";
+import { RedisModel } from "../model/redis.js";
 
 type ApiHandlerData = {
   method: string;

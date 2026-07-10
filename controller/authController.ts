@@ -1,6 +1,6 @@
-import type { Database } from "../model/database";
-import type { SignUpEmail, LoginValidator, UpdatePassword } from "../model/model";
-import { log, logger } from "../utils/logger";
+import type { Database } from "../model/database.js";
+import type { SignUpEmail, LoginValidator, UpdatePassword } from "../model/model.js";
+import { log, logger } from "../utils/logger.js";
 
 class AuthController {
   private db: Database;

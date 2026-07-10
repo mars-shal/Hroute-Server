@@ -1,6 +1,6 @@
 import Groq from 'groq-sdk';
-import { log, logger } from "../utils/logger";
-import { RedisModel } from "./redis";
+import { log, logger } from "../utils/logger.js";
+import { RedisModel } from "./redis.js";
 
 type Role = 'system' | 'user' | 'assistant';
 

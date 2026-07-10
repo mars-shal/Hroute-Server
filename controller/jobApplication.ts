@@ -1,11 +1,11 @@
-import { Crawler } from "../utils/crawler";
-import { EmbeddingService } from "../utils/embedding";
-import { LLM } from "../model/LLM";
-import type { Database } from "../model/database";
-import { JobMatcher } from "./jobMatcher";
-import type { MatchFilters, MatchProgressHandler } from "./jobMatcher";
-import { log, logger } from "../utils/logger";
-import { SEARCHURLS } from "../utils/search";
+import { Crawler } from "../utils/crawler.js";
+import { EmbeddingService } from "../utils/embedding.js";
+import { LLM } from "../model/LLM.js";
+import type { Database } from "../model/database.js";
+import { JobMatcher } from "./jobMatcher.js";
+import type { MatchFilters, MatchProgressHandler } from "./jobMatcher.js";
+import { log, logger } from "../utils/logger.js";
+import { SEARCHURLS } from "../utils/search.js";
 
 /** Strip carriage returns, tabs, zero-width characters from a URL string */
 function cleanUrl(raw: string): string {

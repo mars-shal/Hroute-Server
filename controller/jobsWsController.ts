@@ -2,11 +2,11 @@ import { randomUUID } from "crypto";
 import type { Server as HttpServer } from "http";
 import { WebSocketServer } from "ws";
 import type { WebSocket } from "ws";
-import type { Database } from "../model/database";
-import { RedisModel } from "../model/redis";
-import { JobApplicationController } from "./jobApplication";
-import type { MatchFilters } from "./jobMatcher";
-import { logger } from "../utils/logger";
+import type { Database } from "../model/database.js";
+import { RedisModel } from "../model/redis.js";
+import { JobApplicationController } from "./jobApplication.js";
+import type { MatchFilters } from "./jobMatcher.js";
+import { logger } from "../utils/logger.js";
 
 const CONNECTION_TTL_SECONDS = 60;
 

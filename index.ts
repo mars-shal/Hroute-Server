@@ -1,10 +1,10 @@
 import express from "express";
 import { createServer } from "http";
 import type { Request, Response } from "express";
-import { connectDatabase } from "./model/database";
-import { createApiRouter } from "./controller/apiController";
-import { attachJobsWebSocket } from "./controller/jobsWsController";
-import { log, logger } from "./utils/logger";
+import { connectDatabase } from "./model/database.js";
+import { createApiRouter } from "./controller/apiController.js";
+import { attachJobsWebSocket } from "./controller/jobsWsController.js";
+import { log, logger } from "./utils/logger.js";
 
 const app = express();
 const port = parseInt(process.env.PORT || "8080", 10);

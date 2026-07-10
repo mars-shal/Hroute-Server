@@ -1,6 +1,6 @@
-import type { Database } from "../model/database";
-import { LLM } from "../model/LLM";
-import { logger } from "../utils/logger";
+import type { Database } from "../model/database.js";
+import { LLM } from "../model/LLM.js";
+import { logger } from "../utils/logger.js";
 
 const MAX_CHAT_MESSAGE_CHARS = 4_000;
 const DEFAULT_CHAT_SYSTEM =

@@ -12,8 +12,8 @@ import type {
   RedisHGetPayload,
   RedisSAddPayload,
   RedisSPopPayload,
-} from "./model";
-import { logger } from "../utils/logger";
+} from "./model.js";
+import { logger } from "../utils/logger.js";
 
 class RedisModel {
   private client: RedisClient;

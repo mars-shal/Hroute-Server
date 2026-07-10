@@ -1,8 +1,8 @@
 import { extractText } from 'unpdf';
-import type { Database } from '../model/database';
-import { EmbeddingService } from '../utils/embedding';
-import { LLM } from '../model/LLM';
-import { log, logger } from '../utils/logger';
+import type { Database } from '../model/database.js';
+import { EmbeddingService } from '../utils/embedding.js';
+import { LLM } from '../model/LLM.js';
+import { log, logger } from '../utils/logger.js';
 
 const MAX_RESUME_FILE_BYTES = 2 * 1024 * 1024;
 const MAX_RESUME_FILE_BASE64_CHARS = Math.ceil(MAX_RESUME_FILE_BYTES / 3) * 4;

@@ -1,6 +1,6 @@
 import { pipeline } from '@xenova/transformers';
 import type { FeatureExtractionPipeline } from '@xenova/transformers';
-import { log, logger } from "./logger";
+import { log, logger } from "./logger.js";
 
 class EmbeddingService {
   private static instance: EmbeddingService;

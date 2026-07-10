@@ -1,11 +1,11 @@
 import { Router } from "express";
 import type { Request, Response } from "express";
-import type { Database } from "../model/database";
-import { AuthController } from "./authController";
-import { ChatController } from "./chatController";
-import { JobApplicationController } from "./jobApplication";
-import { ResumeController } from "./resumeController";
-import { log, logger } from "../utils/logger";
+import type { Database } from "../model/database.js";
+import { AuthController } from "./authController.js";
+import { ChatController } from "./chatController.js";
+import { JobApplicationController } from "./jobApplication.js";
+import { ResumeController } from "./resumeController.js";
+import { log, logger } from "../utils/logger.js";
 
 export function createApiRouter(db: Database): Router {
   const router = Router();

@@ -1,7 +1,7 @@
 import { createHash } from "crypto";
-import type { Database } from "../model/database";
-import { RedisModel } from "../model/redis";
-import { logger } from "../utils/logger";
+import type { Database } from "../model/database.js";
+import { RedisModel } from "../model/redis.js";
+import { logger } from "../utils/logger.js";
 
 const MATCH_CACHE_TTL_SECONDS = 600;
 const DEFAULT_LIMIT = 20;
