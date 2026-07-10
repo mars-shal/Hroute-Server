@@ -1,8 +1,35 @@
 # hrout API — Frontend TL;DR
 
-**Base URL**: `https://hroute-server.onrender.com/api`  
-**WebSocket URL**: `wss://hroute-server.onrender.com/api/ws/jobs`  
+**Base URL**: `https://hroute-server.vercel.app/api`  
 **Auth**: `Authorization: Bearer <access_token>` (required on protected routes)
+
+## Quick Start (4 endpoints)
+
+| Step | Endpoint | What you send | What you get |
+|------|----------|---------------|--------------|
+| 1 | `POST /auth/login` | `{ email, password }` | `access_token` |
+| 2 | `POST /resume/upload` | `{ resume_text }` + Bearer | Enables job matching |
+| 3 | `POST /jobs/search` | `{ limit, location, remote }` + Bearer | Ranked jobs with `score`, `matched_skills` |
+| 4 | `POST /chat` | `{ message }` + Bearer | `{ reply: string }` |
+
+> **WebSocket removed** — `wss://.../api/ws/jobs` is gone. Use `POST /api/jobs/search` instead. Sync HTTP, same filters, faster integration.
+
+### Match result shape you care about
+
+```typescript
+interface MatchResult {
+  job_id: string;
+  title: string;
+  company: string;
+  score: number;           // 0–1 relevance
+  similarity: number;      // cosine similarity to your resume
+  matched_skills: string[]; // skills you have they want
+  missing_skills: string[]; // skills they want you don't have
+  rank_reasons: string[];  // why it was recommended
+  apply_url?: string;
+  logo_url?: string | null;
+}
+```
 
 ---
 
@@ -166,121 +193,6 @@ Optional request body:
   "generated_at": "2026-07-10T12:00:00.000Z"
 }
 ```
-
----
-
-## Jobs WebSocket — `/api/ws/jobs`
-
-Use this when the user is actively on the job matches page and you want progress events plus cached results. The socket authenticates first; it does **not** compute on connection.
-
-Connect with either query auth:
-
-```txt
-wss://hroute-server.onrender.com/api/ws/jobs?token=<access_token>
-```
-
-or send an auth message first:
-
-```json
-{ "type": "auth", "token": "access_token" }
-```
-
-Auth success:
-
-```json
-{ "type": "auth.ok" }
-```
-
-Request matches:
-
-```json
-{
-  "type": "jobs.match.request",
-  "request_id": "req_123",
-  "filters": {
-    "limit": 20,
-    "location": "Lagos",
-    "remote": true,
-    "role": "Frontend Developer"
-  }
-}
-```
-
-Server events:
-
-```json
-{ "type": "jobs.match.accepted", "request_id": "req_123" }
-```
-
-```json
-{
-  "type": "jobs.match.progress",
-  "request_id": "req_123",
-  "stage": "vector_search",
-  "message": "Searching jobs"
-}
-```
-
-Cache hit notice:
-
-```json
-{
-  "type": "jobs.match.cache_hit",
-  "request_id": "req_123",
-  "generated_at": "2026-07-10T12:00:00.000Z"
-}
-```
-
-Final results:
-
-```json
-{
-  "type": "jobs.match.results",
-  "request_id": "req_123",
-  "source": "cache",
-  "generated_at": "2026-07-10T12:00:00.000Z",
-  "results": [
-    {
-      "job_id": "uuid",
-      "title": "Frontend Developer",
-      "company": "Paystack",
-      "score": 0.89,
-      "similarity": 0.87,
-      "matched_skills": ["React", "TypeScript"],
-      "missing_skills": ["Playwright"],
-      "rank_reasons": ["skill match", "work style match"]
-    }
-  ]
-}
-```
-
-Error:
-
-```json
-{
-  "type": "jobs.match.error",
-  "request_id": "req_123",
-  "code": "MATCH_FAILED",
-  "message": "No resume embedding found. Upload your resume and try again."
-}
-```
-
-Heartbeat:
-
-```json
-{ "type": "ping", "timestamp": 1783603200000 }
-```
-
-```json
-{ "type": "pong", "timestamp": 1783603200000 }
-```
-
-Cache behavior:
-- match results cache TTL: **600 seconds**
-- active WS connection key TTL: **60 seconds**, refreshed by heartbeat
-- resume uploads bump `resume_version`
-- job ingestion bumps `jobs:index_version`
-- different filters produce different cache keys
 
 **recent**  
 - Returns the last 50 jobs ordered by `crawled_at DESC`.  
@@ -488,7 +400,7 @@ interface Application {
 ## Vanilla JS Quick-Start
 
 ```javascript
-const BASE = "https://hroute-server.onrender.com/api";
+const BASE = "https://hroute-server.vercel.app/api";
 let token = null;
 
 // 1. Log in (or register)
