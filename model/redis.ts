@@ -29,9 +29,11 @@ class RedisModel {
 
   async get(payload: RedisGetString): Promise<string | null> {
     try {
-      const val = await this.client.get<string>(payload.key);
-      logger.info(`[Redis] get ${payload.key}: ${val ? `${val.slice(0, 80)}...` : 'null'}`);
-      return val;
+      const val = await this.client.get(payload.key);
+      const str = val != null ? String(val) : null;
+      const preview = str ? str.slice(0, 80) : 'null';
+      logger.info(`[Redis] get ${payload.key}: ${preview}...`);
+      return str;
     } catch (e) {
       logger.error(`[Redis] get ${payload.key}:`, e);
       return null;
