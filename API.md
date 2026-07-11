@@ -3,16 +3,17 @@
 **Base URL**: `https://hroute-server.vercel.app/api`  
 **Auth**: `Authorization: Bearer <access_token>` (required on protected routes)
 
-## Quick Start (4 endpoints)
+## Quick Start (5 endpoints)
 
 | Step | Endpoint | What you send | What you get |
 |------|----------|---------------|--------------|
 | 1 | `POST /auth/login` | `{ email, password }` | `access_token` |
 | 2 | `POST /resume/upload` | `{ resume_text }` + Bearer | Enables job matching |
-| 3 | `POST /jobs/search` | `{ limit, location, remote }` + Bearer | Ranked jobs with `score`, `matched_skills` |
-| 4 | `POST /chat` | `{ message }` + Bearer | `{ reply: string }` |
+| 3 | `GET /jobs/recent` | — | Random active jobs (no auth) |
+| 4 | `POST /jobs/match` | `{ limit, location, remote }` + Bearer | Ranked jobs with `score`, `matched_skills` |
+| 5 | `POST /chat` | `{ message }` + Bearer | `{ reply: string }` |
 
-> **WebSocket removed** — `wss://.../api/ws/jobs` is gone. Use `POST /api/jobs/search` instead. Sync HTTP, same filters, faster integration.
+> **WebSocket removed** — `wss://.../api/ws/jobs` is gone. Use `POST /api/jobs/match` for personalised ranking or `POST /api/jobs/search` for public query search instead. Sync HTTP, same filters, faster integration.
 
 ### Match result shape you care about
 
@@ -129,8 +130,9 @@ Limits:
 | Method | Path             | Auth    | Request Body                        | Response (success)                  |
 |--------|------------------|---------|-------------------------------------|-------------------------------------|
 | POST   | `/jobs/discover` | Bearer (if `DISCOVER_API_KEY` set) | `{ "seedUrls"?: string[] }`         | `DiscoverResult`                    |
-| POST   | `/jobs/search`   | Bearer  | —                                   | `{ "status": 200, "jobs": MatchResult[] }` |
-| GET    | `/jobs/recent`   | No      | —                                   | `JobRecord[]` (array, not wrapped)  |
+| GET    | `/jobs/recent`   | No      | —                                   | `JobRecord[]` (array, random active browse) |
+| POST   | `/jobs/search`   | No      | `{ "query"?, "location"?, "remote"?, "skills"?, "limit"? }` | `JobRecord[]` (array, not wrapped)  |
+| POST   | `/jobs/match`    | Bearer  | `{ "limit"?, "location"?, "remote"?, "role"?, "salary_target"? }` | `{ "status": 200, "jobs": MatchResult[], "source"?, "generated_at"?, "cache_key"? }` |
 
 **discover**  
 - Crawls job listing pages, extracts structured job data via LLM, stores in DB.  
@@ -150,8 +152,50 @@ Limits:
 }
 ```
 
-**search** (semantic, cached + reranked)  
+**search** (public, query-based)  
+- No auth required. Searches the `jobs` table by text match on `title`, `company`, and `description`.  
+- Filters: `location` (partial match), `remote` (boolean, filters to remote-only jobs), `skills` (array overlap), `limit` (default 50, max 50).  
+- Results are scoped to jobs crawled within the last 60 days.  
+- Response is a **bare JSON array**, not wrapped in an object.
+
+Optional request body:
+
+```json
+{
+  "query": "react developer",
+  "location": "Lagos",
+  "remote": true,
+  "skills": ["TypeScript", "React"],
+  "limit": 20
+}
+```
+
+```json
+[
+  {
+    "id": "uuid",
+    "title": "Junior React Engineer",
+    "company": "Flutterwave",
+    "location": "Lagos, Nigeria",
+    "description": "…",
+    "skills": ["React", "TypeScript"],
+    "remote_status": "hybrid",
+    "salary_range": null,
+    "apply_url": "https://…",
+    "source_site": "linkedin.com",
+    "posted_date": "2026-07-01",
+    "logo_url": "https://…",
+    "crawled_at": "2026-07-09T10:00:00.000Z"
+  }
+]
+```
+
+Errors:
+- `400` if `skills` is not an array or `remote` is not a boolean.
+
+**match** (authenticated, semantic, cached + reranked)  
 - Uses the authenticated user's `resume_embedding` to find similar jobs via cosine similarity (threshold 0.5).  
+- Requires a Bearer token. The user must have uploaded a resume (have a `resume_embedding`).  
 - Pulls 50–100 vector candidates, reranks them with profile/business signals, caches the final payload for 10 minutes, and returns up to `limit` matches.  
 - Cache key includes user id, `resume_version`, `jobs:index_version`, and a stable filter hash.  
 - Returns 400 if no resume embedding exists ("No resume embedding found").
@@ -197,8 +241,9 @@ Optional request body:
 }
 ```
 
-**recent**  
-- Returns the last 50 jobs ordered by `crawled_at DESC`.  
+**recent** (random active browse)  
+- Returns up to 50 random active jobs, scoped to those crawled within the last 60 days.  
+- Results are shuffled server-side — each call may return a different ordering and composition.  
 - No auth required.  
 - Response is a **bare JSON array**, not wrapped in an object:
 
@@ -282,7 +327,7 @@ Errors:
 - `401` if auth is missing/invalid
 - `404` if the user has no uploaded resume file
 
-After upload, the user's profile is fully populated. `GET /auth/me` will include all these fields, and `POST /jobs/search` will work (it needs the resume embedding). Mapped to UI:
+After upload, the user's profile is fully populated. `GET /auth/me` will include all these fields, and `POST /jobs/match` will work (it needs the resume embedding). The public `POST /jobs/search` endpoint does not require a resume. Mapped to UI:
 
 ```jsx
 <ProfileRow label="Role"     value={profile.role}           hint={profile.role ? undefined : undefined} />
@@ -422,25 +467,35 @@ async function login(email, password) {
   }
 }
 
-// 2. Fetch recent jobs (no auth needed)
+// 2. Fetch recent jobs (no auth needed — random active browse)
 async function getRecentJobs() {
   const res = await fetch(`${BASE}/jobs/recent`);
   return res.json(); // bare array
 }
 
-// 3. Semantic search (auth required — uses your resume embedding)
-async function searchJobs() {
+// 3. Public query search (no auth needed)
+async function searchJobs(query = "react") {
   const res = await fetch(`${BASE}/jobs/search`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ query, limit: 20 }),
+  });
+  return res.json(); // bare array
+}
+
+// 4. Semantic match (auth required — uses your resume embedding)
+async function matchJobs() {
+  const res = await fetch(`${BASE}/jobs/match`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       Authorization: `Bearer ${token}`,
     },
   });
-  return res.json(); // { status, jobs: [...], error? }
+  return res.json(); // { status, jobs: [...], source?, error? }
 }
 
-// 4. Chat assistant (auth required)
+// 5. Chat assistant (auth required)
 async function chat(message) {
   const res = await fetch(`${BASE}/chat`, {
     method: "POST",
@@ -453,7 +508,7 @@ async function chat(message) {
   return res.json(); // { status, reply?, error? }
 }
 
-// 5. Resume signed URL (auth required)
+// 6. Resume signed URL (auth required)
 async function getResumeFileUrl() {
   const res = await fetch(`${BASE}/resume/file`, {
     headers: { Authorization: `Bearer ${token}` },
@@ -466,8 +521,10 @@ async function main() {
   await login("user@example.com", "password123");
   const recent = await getRecentJobs();
   console.log(`${recent.length} recent jobs`);
-  const matches = await searchJobs();
-  console.log(`${matches.jobs.length} matching jobs`);
+  const results = await searchJobs("react developer");
+  console.log(`${results.length} search results`);
+  const matches = await matchJobs();
+  console.log(`${matches.jobs?.length ?? 0} matching jobs`);
   const assistant = await chat("How can I improve my profile?");
   console.log(assistant.reply);
 }
@@ -481,6 +538,6 @@ main().catch(console.error);
 
 - All routes are prefixed with `/api` (so full path is e.g. `POST /api/auth/login`).  
 - Use `import type { UserProfile, StructuredJob, JobRecord, MatchResult, Application }` from `model/model.ts` for the canonical TS types.  
-- `logo_url` is returned by `match_jobs()` and `GET /jobs/recent`; handle it as `string | null`.  
+- `logo_url` is returned by `GET /jobs/recent`, `POST /jobs/search`, and `POST /jobs/match`; handle it as `string | null`.  
 - Uploaded resume files are private. Use `GET /api/resume/file` to request a temporary signed URL instead of storing a permanent URL.  
 - To populate the jobs table for the first time, call `POST /api/jobs/discover` once. It crawls 35 seed URLs and can take several minutes.
