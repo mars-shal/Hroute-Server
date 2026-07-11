@@ -577,6 +577,69 @@ class Database {
     }
   }
 
+  async listJobsForCleanup(limit: number = 1000): Promise<ApiResponse> {
+    try {
+      const { data, error } = await this.supabase
+        .from('jobs')
+        .select('id,description,skills,remote_status,apply_url,source_url,posted_date')
+        .order('crawled_at', { ascending: false })
+        .limit(limit);
+
+      if (error) throw error;
+      return { status: 200, data: data ?? [] };
+    } catch (e) {
+      logger.error(`[listJobsForCleanup] Error: ${e}`);
+      return { response: String(e), status: 500 };
+    }
+  }
+
+  async updateJobById(jobId: string, patch: Record<string, unknown>): Promise<ApiResponse> {
+    try {
+      const { data, error } = await this.supabase
+        .from('jobs')
+        .update(patch)
+        .eq('id', jobId)
+        .select('id')
+        .maybeSingle();
+
+      if (error) throw error;
+      return { status: 200, data };
+    } catch (e) {
+      logger.error(`[updateJobById] Error: ${e}`);
+      return { response: String(e), status: 500 };
+    }
+  }
+
+  async deleteJobVector(jobId: string): Promise<ApiResponse> {
+    try {
+      const { error } = await this.supabase
+        .from('job_vectors')
+        .delete()
+        .eq('job_id', jobId);
+
+      if (error) throw error;
+      return { status: 200 };
+    } catch (e) {
+      logger.error(`[deleteJobVector] Error: ${e}`);
+      return { response: String(e), status: 500 };
+    }
+  }
+
+  async deleteJobById(jobId: string): Promise<ApiResponse> {
+    try {
+      const { error } = await this.supabase
+        .from('jobs')
+        .delete()
+        .eq('id', jobId);
+
+      if (error) throw error;
+      return { status: 200 };
+    } catch (e) {
+      logger.error(`[deleteJobById] Error: ${e}`);
+      return { response: String(e), status: 500 };
+    }
+  }
+
   async searchJobsByEmbedding(
     embedding: number[],
     matchThreshold: number = 0.5,
@@ -773,6 +836,10 @@ export type DatabaseLike = Pick<
   | "storeJobVector"
   | "getJobsRecent"
   | "getJobBySourceUrl"
+  | "listJobsForCleanup"
+  | "updateJobById"
+  | "deleteJobVector"
+  | "deleteJobById"
   | "searchJobsByEmbedding"
   | "saveApplication"
   | "updateApplicationStatus"

@@ -127,6 +127,28 @@ export function createFakeDatabase(options: FakeDatabaseOptions = {}) {
       const job = state.jobs.find((item) => item.source_url === sourceUrl);
       return job ? { status: 200, data: job } : { status: 404, response: "Job not found" };
     },
+    async listJobsForCleanup(limit = 1000) {
+      return { status: 200, data: state.jobs.slice(0, limit) };
+    },
+    async updateJobById(jobId: string, patch: Record<string, unknown>) {
+      const index = state.jobs.findIndex((item) => item.id === jobId);
+      if (index === -1) {
+        return { status: 404, response: "Job not found" };
+      }
+      state.jobs[index] = { ...state.jobs[index], ...patch };
+      return { status: 200, data: { id: jobId } };
+    },
+    async deleteJobVector() {
+      return { status: 200 };
+    },
+    async deleteJobById(jobId: string) {
+      const nextJobs = state.jobs.filter((item) => item.id !== jobId);
+      if (nextJobs.length === state.jobs.length) {
+        return { status: 404, response: "Job not found" };
+      }
+      state.jobs = nextJobs;
+      return { status: 200 };
+    },
     async searchJobsByEmbedding() {
       return { status: 200, data: state.jobs };
     },
