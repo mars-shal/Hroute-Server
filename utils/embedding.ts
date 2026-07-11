@@ -1,5 +1,6 @@
 import { pipeline } from '@xenova/transformers';
 import type { FeatureExtractionPipeline } from '@xenova/transformers';
+import { mkdirSync } from 'fs';
 import { log, logger } from "./logger.js";
 
 class EmbeddingService {
@@ -10,6 +11,16 @@ class EmbeddingService {
 
   static async getInstance(): Promise<EmbeddingService> {
     if (!EmbeddingService.instance) {
+      // Vercel serverless runtime: /var/task/ is read-only, so redirect
+      // the transformers.js model cache to /tmp/ which is writable.
+      if (!process.env.TRANSFORMERS_CACHE) {
+        process.env.TRANSFORMERS_CACHE = '/tmp/transformers_cache';
+      }
+      try {
+        mkdirSync(process.env.TRANSFORMERS_CACHE, { recursive: true });
+      } catch {
+        // non-fatal — model still loads, just can't cache to disk
+      }
       logger.info('[EmbeddingService] Creating singleton instance');
       EmbeddingService.instance = new EmbeddingService();
     }
