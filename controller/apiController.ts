@@ -4,6 +4,7 @@ import type { DatabaseLike } from "../model/database.js";
 import { AuthController } from "./authController.js";
 import { ChatController } from "./chatController.js";
 import { JobApplicationController } from "./jobApplication.js";
+import { JobMaintenanceController } from "./jobMaintenance.js";
 import { ResumeController } from "./resumeController.js";
 import { log, logger } from "../utils/logger.js";
 
@@ -11,6 +12,7 @@ type ApiControllerDeps = {
   auth?: AuthController;
   chat?: ChatController;
   jobs?: JobApplicationController;
+  jobMaintenance?: JobMaintenanceController;
   resume?: ResumeController;
 };
 
@@ -19,6 +21,7 @@ export function createApiRouter(db: DatabaseLike, deps: ApiControllerDeps = {}):
   const auth = deps.auth ?? new AuthController(db);
   const chat = deps.chat ?? new ChatController(db);
   const jobs = deps.jobs ?? new JobApplicationController(db);
+  const jobMaintenance = deps.jobMaintenance ?? new JobMaintenanceController(db);
   const resume = deps.resume ?? new ResumeController(db);
 
   // ── Auth routes ──────────────────────────────────────────────
@@ -200,17 +203,37 @@ export function createApiRouter(db: DatabaseLike, deps: ApiControllerDeps = {}):
       }
     }
 
-    const { seedUrls } = (req.body ?? {}) as { seedUrls?: string[] };
+    const body = (req.body ?? {}) as {
+      seedUrls?: string[];
+      limit?: number;
+      dry_run?: boolean;
+      prune_old?: boolean;
+      recompute_embeddings?: boolean;
+    };
+    const { seedUrls } = body;
     logger.info(`[API] POST /jobs/discover (seedUrls=${seedUrls?.length ?? 'default (35)'})`);
     await log(`[API] POST /jobs/discover start`);
     try {
+      const cleanupResult = await jobMaintenance.CleanupJobs({
+        limit: body.limit,
+        dry_run: body.dry_run,
+        prune_old: body.prune_old ?? true,
+        recompute_embeddings: body.recompute_embeddings,
+      });
+      if (cleanupResult.status !== 200) {
+        logger.error(`[API] POST /jobs/discover cleanup failed → ${cleanupResult.status}`);
+        await log(`[API] POST /jobs/discover cleanup failed: ${cleanupResult.message}`);
+        res.status(cleanupResult.status).json({ cleanup: cleanupResult });
+        return;
+      }
+
       // Defaults to SEARCHURLS from utils/search.ts when nothing sent
       const result = await jobs.Discover(
         Array.isArray(seedUrls) ? seedUrls : undefined,
       );
       logger.info(`[API] POST /jobs/discover → ${result.status} (${result.total_jobs} jobs)`);
       await log(`[API] POST /jobs/discover done: ${result.total_jobs} jobs`);
-      res.json(result);
+      res.json({ ...result, cleanup: cleanupResult });
     } catch (e) {
       logger.error("[POST /jobs/discover]", e);
       await log(`[API] POST /jobs/discover ERROR: ${e}`);
@@ -231,6 +254,37 @@ export function createApiRouter(db: DatabaseLike, deps: ApiControllerDeps = {}):
       res.json(result);
     } catch (e) {
       logger.error("[POST /jobs/search]", e);
+      res.status(500).json({ error: String(e) });
+    }
+  });
+
+  router.post("/jobs/cleanup", async (req: Request, res: Response) => {
+    const discoverApiKey = process.env.DISCOVER_API_KEY;
+    if (discoverApiKey) {
+      const auth = req.headers.authorization;
+      if (!auth || !auth.startsWith("Bearer ") || auth.slice(7) !== discoverApiKey) {
+        res.status(401).json({ error: "Invalid or missing discover API key" });
+        return;
+      }
+    }
+
+    const body = (req.body ?? {}) as {
+      limit?: number;
+      dry_run?: boolean;
+      prune_old?: boolean;
+      recompute_embeddings?: boolean;
+    };
+
+    logger.info(`[API] POST /jobs/cleanup (limit=${body.limit ?? 1000}, dry_run=${body.dry_run ?? false}, prune_old=${body.prune_old ?? false})`);
+    await log(`[API] POST /jobs/cleanup start`);
+    try {
+      const result = await jobMaintenance.CleanupJobs(body);
+      logger.info(`[API] POST /jobs/cleanup → ${result.status} (updated=${result.updated}, pruned=${result.pruned})`);
+      await log(`[API] POST /jobs/cleanup done: updated=${result.updated} pruned=${result.pruned}`);
+      res.status(result.status).json(result);
+    } catch (e) {
+      logger.error("[POST /jobs/cleanup]", e);
+      await log(`[API] POST /jobs/cleanup ERROR: ${e}`);
       res.status(500).json({ error: String(e) });
     }
   });
