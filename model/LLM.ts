@@ -223,7 +223,18 @@ class LLM {
     logger.info(`[LLM] extractJob (text.length=${text.length}, truncated=${truncated.length})`);
     await log(`[LLM] extractJob starting (${text.length} chars, truncated=${truncated.length})`);
     const result = await this.structured(
-      `Extract structured job info from the following text. Return a JSON object with fields: title, company, location, description, skills[], remote_status, salary_range, apply_url, posted_date, source_site. Use null for missing fields.\n\n${truncated}`,
+      `Extract structured job info from the following text. Return a JSON object with these fields:
+        - title: job title (string, required)
+        - company: company name (string, required)
+        - location: job location (string or null)
+        - description: a clean, readable paragraph with excess whitespace and newlines removed (string)
+        - skills: array of skills mentioned, extracted from description context if not explicitly listed (string[], required — if none found return [])
+        - remote_status: "true" if fully remote, "hybrid" if partly remote, "false" if onsite. Infer from location/description context if not explicit. Default "unknown" only if no clue (string)
+        - salary_range: salary or pay range if mentioned (string or null)
+        - apply_url: direct application URL if found (string or null)
+        - posted_date: original posted date string as-is from the text, or relative like "2 days ago" (string or null)
+        - source_site: domain name of the source (string or null)
+      Use null for truly missing fields. Do NOT include markdown formatting in description.\n\n${truncated}`,
       (raw: string) => {
         const cleaned = raw.replace(/```(?:json)?\s*/gi, "").trim();
         return JSON.parse(cleaned) as Record<string, unknown>;

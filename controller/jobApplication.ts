@@ -6,6 +6,7 @@ import { JobMatcher } from "./jobMatcher.js";
 import type { JobMatcherService, MatchFilters, MatchProgressHandler } from "./jobMatcher.js";
 import { log, logger } from "../utils/logger.js";
 import { SEARCHURLS } from "../utils/search.js";
+import { normalizeJobCleanupInput } from "../utils/jobCleanup.js";
 
 /** Strip carriage returns, tabs, zero-width characters from a URL string */
 function cleanUrl(raw: string): string {
@@ -84,15 +85,44 @@ class JobApplicationController {
               continue;
             }
 
+            const normalized = normalizeJobCleanupInput({
+              description:
+                typeof job.description === "string" && job.description.trim().length > 0
+                  ? job.description
+                  : markdown.slice(0, 2000),
+              skills: Array.isArray(job.skills)
+                ? job.skills.filter((skill): skill is string => typeof skill === "string")
+                : undefined,
+              remoteStatus: typeof job.remote_status === "string" ? job.remote_status : undefined,
+              applyUrl: typeof job.apply_url === "string" ? job.apply_url : undefined,
+              sourceUrl: pageUrl,
+              postedDate: job.posted_date,
+            });
+
+            if (normalized.isStale) {
+              const ageDays = normalized.ageDays ?? 0;
+              logger.info(`[Discover] Skipping ${pageUrl} — posted ${ageDays.toFixed(0)} days ago (>60)`);
+              await log(`[Discover] Skip (old): ${pageUrl} (${ageDays.toFixed(0)}d)`);
+              continue;
+            }
+
+            if ((!Array.isArray(job.skills) || job.skills.length === 0) && normalized.skills.length > 0) {
+              logger.info(`[Discover] Inferred ${normalized.skills.length} skills from description for ${pageUrl}`);
+            }
+
+            if ((typeof job.remote_status !== "string" || job.remote_status === "unknown") && normalized.remoteStatus !== "unknown") {
+              logger.info(`[Discover] Inferred remote_status=${normalized.remoteStatus} for ${pageUrl}`);
+            }
+
             const storeRes = await this.db.storeJob({
               title: job.title,
               company: job.company,
               location: job.location ?? null,
-              description: job.description ?? markdown.slice(0, 2000),
-              skills: job.skills ?? [],
-              remote_status: job.remote_status ?? "unknown",
+              description: normalized.description,
+              skills: normalized.skills,
+              remote_status: normalized.remoteStatus,
               salary_range: job.salary_range ?? null,
-              apply_url: job.apply_url ?? null,
+              apply_url: normalized.applyUrl,
               posted_date: job.posted_date ?? null,
               source_site: job.source_site ?? seedUrl,
               source_url: pageUrl,
@@ -110,9 +140,8 @@ class JobApplicationController {
                 : (storedJob as { id: string } | undefined)?.id;
 
             if (jobId) {
-              const description = typeof job.description === "string" ? job.description : "";
-              if (description.length > 20) {
-                const vector = await embeddingService.embed(description);
+              if (normalized.description.length > 20) {
+                const vector = await embeddingService.embed(normalized.description);
                 await this.db.storeJobVector(jobId, vector);
                 await this.matcher.bumpJobsIndexVersion();
               }
