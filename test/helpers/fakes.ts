@@ -149,6 +149,12 @@ export function createFakeDatabase(options: FakeDatabaseOptions = {}) {
       state.jobs = nextJobs;
       return { status: 200 };
     },
+    async getRandomActiveJobs(limit = 50) {
+      return { status: 200, data: state.jobs.slice(0, limit) };
+    },
+    async searchJobsByQuery() {
+      return { status: 200, data: state.jobs };
+    },
     async searchJobsByEmbedding() {
       return { status: 200, data: state.jobs };
     },

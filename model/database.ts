@@ -544,6 +544,80 @@ class Database {
     }
   }
 
+  async getRandomActiveJobs(limit: number = 50): Promise<ApiResponse> {
+    try {
+      const maxLimit = Math.min(limit, 50);
+      // 60-day freshness window matching cleanup/discovery policy
+      const cutoff = new Date(Date.now() - 60 * 24 * 60 * 60 * 1000).toISOString();
+      const fetchCount = Math.min(maxLimit * 5, 250);
+
+      const { data, error } = await this.supabase
+        .from('jobs')
+        .select('*')
+        .gte('crawled_at', cutoff)
+        .order('crawled_at', { ascending: false })
+        .limit(fetchCount);
+
+      if (error) throw error;
+
+      const candidates = data ?? [];
+      for (let i = candidates.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [candidates[i], candidates[j]] = [candidates[j], candidates[i]];
+      }
+
+      return { status: 200, data: candidates.slice(0, maxLimit) };
+    } catch (e) {
+      logger.error(`[getRandomActiveJobs] Error: ${e}`);
+      return { response: String(e), status: 500 };
+    }
+  }
+
+  async searchJobsByQuery(params: {
+    query?: string;
+    location?: string;
+    remote?: boolean;
+    skills?: string[];
+    limit?: number;
+  } = {}): Promise<ApiResponse> {
+    try {
+      // Default freshness: 60-day window matching cleanup policy
+      const cutoff = new Date(Date.now() - 60 * 24 * 60 * 60 * 1000).toISOString();
+      const maxLimit = Math.min(params.limit ?? 50, 50);
+
+      let query = this.supabase
+        .from('jobs')
+        .select('*')
+        .gte('crawled_at', cutoff);
+
+      if (params.query) {
+        const term = params.query.trim();
+        query = query.or(
+          `title.ilike.%${term}%,company.ilike.%${term}%,description.ilike.%${term}%`,
+        );
+      }
+      if (params.location) {
+        query = query.ilike('location', `%${params.location.trim()}%`);
+      }
+      if (params.remote === true) {
+        query = query.eq('remote_status', 'remote');
+      }
+      if (Array.isArray(params.skills) && params.skills.length > 0) {
+        query = query.overlaps('skills', params.skills);
+      }
+
+      const { data, error } = await query
+        .order('crawled_at', { ascending: false })
+        .limit(maxLimit);
+
+      if (error) throw error;
+      return { status: 200, data: data ?? [] };
+    } catch (e) {
+      logger.error(`[searchJobsByQuery] Error: ${e}`);
+      return { response: String(e), status: 500 };
+    }
+  }
+
   async getJobsRecent(limit: number = 50): Promise<ApiResponse> {
     try {
       const { data, error } = await this.supabase
@@ -834,6 +908,7 @@ export type DatabaseLike = Pick<
   | "deleteUser"
   | "storeJob"
   | "storeJobVector"
+  | "getRandomActiveJobs"
   | "getJobsRecent"
   | "getJobBySourceUrl"
   | "listJobsForCleanup"
@@ -841,6 +916,7 @@ export type DatabaseLike = Pick<
   | "deleteJobVector"
   | "deleteJobById"
   | "searchJobsByEmbedding"
+  | "searchJobsByQuery"
   | "saveApplication"
   | "updateApplicationStatus"
   | "getApplications"

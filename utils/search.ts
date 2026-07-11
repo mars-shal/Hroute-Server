@@ -5,12 +5,14 @@ export const SEARCHURLS = [
   "https://remote.co",
   "https://remotive.com",
   "https://himalayas.app",
+
   // Tech startup & senior
   "https://wellfound.com",
   "https://www.ycombinator.com/jobs",
   "https://arc.dev/en-ng/remote-jobs",
   "https://cord.co",
   "https://landing.jobs",
+
   // Tech aggregators
   "https://hiringcafe.com",
   "https://dynamitejobs.com",
@@ -18,6 +20,7 @@ export const SEARCHURLS = [
   "https://dailyremote.com",
   "https://justremote.co",
   "https://jobspresso.co",
+
   // Africa-focused
   "https://jobberman.com",
   "https://remote4africa.com",
@@ -28,4 +31,14 @@ export const SEARCHURLS = [
   "https://www.talentql.com",
   "https://www.andela.com",
   "https://www.gebeya.com",
+
+  // Nigeria-focused / Nigeria-friendly additions
+  "https://ng.indeed.com",
+  "https://ng.linkedin.com/jobs",
+  "https://www.nigeriajob.com",
+  "https://ng.prosple.com/entry-level-jobs-nigeria",
+  "https://ng.prosple.com/entry-level-remote-jobs",
+  "https://www.myjobmag.com/cp/entry-level-jobs-nigeria",
+  "https://www.jobberman.com/jobs",
+  "https://ng.jooble.org",
 ];

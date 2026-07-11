@@ -158,9 +158,19 @@ class JobMatcher {
 
     try {
       const parsed = JSON.parse(raw) as CachedMatchPayload;
-      return Array.isArray(parsed.results) ? parsed : null;
+      if (
+        typeof parsed.generated_at === "string" &&
+        typeof parsed.jobs_version === "string" &&
+        Array.isArray(parsed.results)
+      ) {
+        return parsed;
+      }
+      logger.warn(`[JobMatcher] cache shape mismatch for ${key}, deleting`);
+      await this.redis.delete(key).catch(() => {});
+      return null;
     } catch (e) {
-      logger.warn(`[JobMatcher] cache parse failed for ${key}: ${e}`);
+      logger.warn(`[JobMatcher] cache parse failed for ${key}: ${e}, deleting bad entry`);
+      await this.redis.delete(key).catch(() => {});
       return null;
     }
   }
@@ -197,10 +207,10 @@ class JobMatcher {
     const salaryScore = this.salaryScore(job.salary_range, filters.salary_target ?? profile.salary_target);
     const missingRequiredPenalty = Math.min(0.4, missingSkills.length * 0.05);
     const rawScore =
-      similarity * 0.6 +
+      similarity * 0.8 +
       skillScore * 0.2 +
-      locationScore * 0.08 +
-      workStyleScore * 0.06 +
+      locationScore * 0.06 +
+      workStyleScore * 0.05 +
       recencyScore * 0.04 +
       salaryScore * 0.02 -
       missingRequiredPenalty;

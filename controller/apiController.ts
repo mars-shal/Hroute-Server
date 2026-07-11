@@ -241,23 +241,6 @@ export function createApiRouter(db: DatabaseLike, deps: ApiControllerDeps = {}):
     }
   });
 
-  router.post("/jobs/search", async (req: Request, res: Response) => {
-    logger.info(`[API] POST /jobs/search`);
-    try {
-      const token = extractToken(req);
-      if (!token) {
-        res.status(401).json({ error: "Missing Authorization header" });
-        return;
-      }
-      const result = await jobs.Search(token, req.body ?? {});
-      logger.info(`[API] POST /jobs/search → ${result.status} (${result.jobs.length} jobs)`);
-      res.json(result);
-    } catch (e) {
-      logger.error("[POST /jobs/search]", e);
-      res.status(500).json({ error: String(e) });
-    }
-  });
-
   router.post("/jobs/cleanup", async (req: Request, res: Response) => {
     const discoverApiKey = process.env.DISCOVER_API_KEY;
     if (discoverApiKey) {
@@ -326,14 +309,61 @@ export function createApiRouter(db: DatabaseLike, deps: ApiControllerDeps = {}):
   });
 
   router.get("/jobs/recent", async (_req: Request, res: Response) => {
-    logger.info(`[API] GET /jobs/recent`);
+    logger.info(`[API] GET /jobs/recent (random active browse)`);
     try {
-      const result = await db.getJobsRecent(50);
+      const result = await db.getRandomActiveJobs(50);
       const data = (result.data ?? []) as unknown[];
-      logger.info(`[API] GET /jobs/recent → 200 (${data.length} jobs)`);
+      logger.info(`[API] GET /jobs/recent → 200 (${data.length} jobs, random active browse)`);
       res.json(data);
     } catch (e) {
       logger.error("[GET /jobs/recent]", e);
+      res.status(500).json({ error: String(e) });
+    }
+  });
+
+  router.post("/jobs/search", async (req: Request, res: Response) => {
+    logger.info(`[API] POST /jobs/search (public query)`);
+    try {
+      const body = (req.body ?? {}) as {
+        query?: string;
+        location?: string;
+        remote?: boolean;
+        skills?: string[];
+        limit?: number;
+      };
+
+      if (body.skills !== undefined && !Array.isArray(body.skills)) {
+        res.status(400).json({ error: "skills must be an array of strings" });
+        return;
+      }
+      if (body.remote !== undefined && typeof body.remote !== "boolean") {
+        res.status(400).json({ error: "remote must be a boolean" });
+        return;
+      }
+
+      const result = await db.searchJobsByQuery(body);
+      const data = (result.data ?? []) as unknown[];
+      logger.info(`[API] POST /jobs/search → ${result.status} (${data.length} jobs)`);
+      res.status(result.status ?? 500).json(data);
+    } catch (e) {
+      logger.error("[POST /jobs/search]", e);
+      res.status(500).json({ error: String(e) });
+    }
+  });
+
+  router.post("/jobs/match", async (req: Request, res: Response) => {
+    logger.info(`[API] POST /jobs/match`);
+    try {
+      const token = extractToken(req);
+      if (!token) {
+        res.status(401).json({ error: "Missing Authorization header" });
+        return;
+      }
+      const result = await jobs.Search(token, req.body ?? {});
+      logger.info(`[API] POST /jobs/match → ${result.status} (${result.jobs.length} jobs)`);
+      res.json(result);
+    } catch (e) {
+      logger.error("[POST /jobs/match]", e);
       res.status(500).json({ error: String(e) });
     }
   });
