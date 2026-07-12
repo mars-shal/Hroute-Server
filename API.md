@@ -72,10 +72,15 @@ No auth required.
 
 **refresh**  
 - The `refresh_token` originally returned by register/login.  
-- Returns a new `access_token` (no new refresh token).
+- Returns a new `access_token` (no new refresh token).  
+- The frontend should call this when a request returns 401 to silently rotate the token before showing a login screen.
 
 **me**  
 - Returns the full `UserProfile` for the authenticated user.
+
+**isme**  
+- Same profile response as `/auth/me`, but returns **404** instead of 401 when the token is missing or invalid.  
+- Use this to silently check if a user is still logged in (no error UI needed on 404).
 
 **profile**  
 - PATCH-like `PUT` — send only the fields you want to change.  
@@ -468,13 +473,23 @@ async function login(email, password) {
   }
 }
 
-// 2. Fetch recent jobs (no auth needed — random active browse)
+// 2. Check if your token is still valid (returns profile or 404)
+async function checkSession() {
+  if (!token) return null;
+  const res = await fetch(`${BASE}/auth/isme`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (res.status === 404) { token = null; return null; }
+  return res.json(); // { status: 200, user: UserProfile }
+}
+
+// 3. Fetch recent jobs (no auth needed — random active browse)
 async function getRecentJobs() {
   const res = await fetch(`${BASE}/jobs/recent`);
   return res.json(); // bare array
 }
 
-// 3. Public query search (no auth needed)
+// 4. Public query search (no auth needed)
 async function searchJobs(query = "react") {
   const res = await fetch(`${BASE}/jobs/search`, {
     method: "POST",
@@ -484,7 +499,7 @@ async function searchJobs(query = "react") {
   return res.json(); // bare array
 }
 
-// 4. Semantic match (auth required — uses your resume embedding)
+// 5. Semantic match (auth required — uses your resume embedding)
 async function matchJobs() {
   const res = await fetch(`${BASE}/jobs/match`, {
     method: "POST",
@@ -496,7 +511,7 @@ async function matchJobs() {
   return res.json(); // { status, jobs: [...], source?, error? }
 }
 
-// 5. Chat assistant (auth required)
+// 6. Chat assistant (auth required)
 async function chat(message) {
   const res = await fetch(`${BASE}/chat`, {
     method: "POST",
@@ -509,7 +524,7 @@ async function chat(message) {
   return res.json(); // { status, reply?, error? }
 }
 
-// 6. Resume signed URL (auth required)
+// 7. Resume signed URL (auth required)
 async function getResumeFileUrl() {
   const res = await fetch(`${BASE}/resume/file`, {
     headers: { Authorization: `Bearer ${token}` },
