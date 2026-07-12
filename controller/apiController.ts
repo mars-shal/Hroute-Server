@@ -172,6 +172,27 @@ export function createApiRouter(db: DatabaseLike, deps: ApiControllerDeps = {}):
     }
   });
 
+  router.get("/auth/isme", async (req: Request, res: Response) => {
+    logger.info(`[API] GET /auth/isme`);
+    try {
+      const token = extractToken(req);
+      if (!token) {
+        res.status(404).json({ error: "User not found" });
+        return;
+      }
+      const result = await auth.GetProfile(token);
+      if (result.status !== 200) {
+        res.status(404).json({ error: "User not found" });
+        return;
+      }
+      logger.info(`[API] GET /auth/isme → 200`);
+      res.status(200).json({ status: 200, user: result });
+    } catch (e) {
+      logger.error("[GET /auth/isme]", e);
+      res.status(404).json({ error: "User not found" });
+    }
+  });
+
   router.post("/chat", async (req: Request, res: Response) => {
     logger.info(`[API] POST /chat`);
     try {

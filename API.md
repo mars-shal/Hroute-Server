@@ -58,6 +58,7 @@ No auth required.
 | POST   | `/auth/refresh`  | No    | `{ "refresh_token": string }`                  | `{ "status": 200, "access_token": string, "expires_in": number }`       |
 | POST   | `/auth/logout`   | Bearer | —                                               | `{ "status": 200, "message": "Logged out" }`                            |
 | GET    | `/auth/me`       | Bearer | —                                               | `{ "status": 200, "user": UserProfile }`                                |
+| GET    | `/auth/isme`     | Bearer | —                                               | `{ "status": 200, "user": UserProfile }` — 404 if no token or invalid   |
 | PUT    | `/auth/profile`  | Bearer | `{ "display_name"?: string, "skills"?: string[], … }` | `{ "status": 200, "message": "Profile updated" }`                 |
 | PUT    | `/auth/password` | Bearer | `{ "current_password": string, "new_password": string }` | `{ "status": 200, "message": "Password updated" }`               |
 | DELETE | `/auth/account`  | Bearer | —                                               | `{ "status": 200, "message": "Account deleted" }`                       |
