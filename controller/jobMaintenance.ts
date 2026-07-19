@@ -20,6 +20,10 @@ type CleanupJobsOptions = {
   readonly dry_run?: boolean;
   readonly prune_old?: boolean;
   readonly recompute_embeddings?: boolean;
+  /** Re-derive skills from description using the current word-boundary regex,
+   * replacing stored skills. Use this once after fixing inferSkillsFromText
+   * to purge false positives from old substring matching. */
+  readonly force_reinfer_skills?: boolean;
 };
 
 type CleanupJobsResult = {
@@ -47,6 +51,7 @@ class JobMaintenanceController {
     const dryRun = options.dry_run ?? false;
     const pruneOld = options.prune_old ?? false;
     const recomputeEmbeddings = options.recompute_embeddings ?? true;
+    const reinferSkills = options.force_reinfer_skills ?? false;
     const errors: string[] = [];
 
     const listResult = await this.db.listJobsForCleanup(limit);
@@ -80,7 +85,7 @@ class JobMaintenanceController {
     for (const row of rows) {
       const normalized = normalizeJobCleanupInput({
         description: row.description ?? "",
-        skills: row.skills,
+        skills: reinferSkills ? null : row.skills,
         remoteStatus: row.remote_status,
         applyUrl: row.apply_url,
         sourceUrl: row.source_url,
@@ -159,9 +164,10 @@ class JobMaintenanceController {
       await this.matcher.bumpJobsIndexVersion();
     }
 
+    const reinferLabel = reinferSkills ? " (skills re-inferred)" : "";
     const message = pruneOld
-      ? `Cleanup scanned ${rows.length} jobs, updated ${updated}, pruned ${pruned}, found ${staleFound} stale.`
-      : `Cleanup scanned ${rows.length} jobs, updated ${updated}, found ${staleFound} stale.`;
+      ? `Cleanup scanned ${rows.length} jobs, updated ${updated}, pruned ${pruned}, found ${staleFound} stale.${reinferLabel}`
+      : `Cleanup scanned ${rows.length} jobs, updated ${updated}, found ${staleFound} stale.${reinferLabel}`;
 
     logger.info(`[JobMaintenance] ${message}`);
     await log(`[JobMaintenance] ${message}`);

@@ -176,17 +176,40 @@ export function createApiRouter(db: DatabaseLike, deps: ApiControllerDeps = {}):
     logger.info(`[API] GET /auth/isme`);
     try {
       const token = extractToken(req);
-      if (!token) {
+      const refreshToken = req.headers["x-refresh-token"] as string | undefined;
+
+      if (!token && !refreshToken) {
         res.status(404).json({ error: "User not found" });
         return;
       }
-      const result = await auth.GetProfile(token);
-      if (result.status !== 200) {
-        res.status(404).json({ error: "User not found" });
-        return;
+
+      if (token) {
+        const profile = await auth.GetProfile(token);
+        if (profile.status === 200) {
+          logger.info(`[API] GET /auth/isme → 200 (access token)`);
+          res.status(200).json({ status: 200, user: profile });
+          return;
+        }
       }
-      logger.info(`[API] GET /auth/isme → 200`);
-      res.status(200).json({ status: 200, user: result });
+
+      if (refreshToken) {
+        const refreshed = await auth.RefreshToken(refreshToken);
+        if (refreshed.status === 200 && refreshed.access_token) {
+          const profile = await auth.GetProfile(String(refreshed.access_token));
+          if (profile.status === 200) {
+            logger.info(`[API] GET /auth/isme → 200 (refreshed)`);
+            res.status(200).json({
+              status: 200,
+              user: profile,
+              access_token: refreshed.access_token,
+              expires_in: refreshed.expires_in,
+            });
+            return;
+          }
+        }
+      }
+
+      res.status(404).json({ error: "User not found" });
     } catch (e) {
       logger.error("[GET /auth/isme]", e);
       res.status(404).json({ error: "User not found" });
@@ -325,6 +348,45 @@ export function createApiRouter(db: DatabaseLike, deps: ApiControllerDeps = {}):
       res.status(result.status).json(result);
     } catch (e) {
       logger.error("[GET /resume/file]", e);
+      res.status(500).json({ error: String(e) });
+    }
+  });
+
+  router.post("/resume/improve", async (req: Request, res: Response) => {
+    logger.info(`[API] POST /resume/improve`);
+    try {
+      const token = extractToken(req);
+      if (!token) {
+        res.status(401).json({ error: "Missing Authorization header" });
+        return;
+      }
+      const { message } = req.body as { message?: string };
+      if (!message) {
+        res.status(400).json({ error: "message required" });
+        return;
+      }
+      const result = await resume.improve(token, message);
+      logger.info(`[API] POST /resume/improve → ${result.status}`);
+      res.status(result.status).json(result);
+    } catch (e) {
+      logger.error("[POST /resume/improve]", e);
+      res.status(500).json({ error: String(e) });
+    }
+  });
+
+  router.post("/resume/export", async (req: Request, res: Response) => {
+    logger.info(`[API] POST /resume/export`);
+    try {
+      const token = extractToken(req);
+      if (!token) {
+        res.status(401).json({ error: "Missing Authorization header" });
+        return;
+      }
+      const result = await resume.exportPdf(token);
+      logger.info(`[API] POST /resume/export → ${result.status}`);
+      res.status(result.status).json(result);
+    } catch (e) {
+      logger.error("[POST /resume/export]", e);
       res.status(500).json({ error: String(e) });
     }
   });

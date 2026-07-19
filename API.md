@@ -58,7 +58,7 @@ No auth required.
 | POST   | `/auth/refresh`  | No    | `{ "refresh_token": string }`                  | `{ "status": 200, "access_token": string, "expires_in": number }`       |
 | POST   | `/auth/logout`   | Bearer | —                                               | `{ "status": 200, "message": "Logged out" }`                            |
 | GET    | `/auth/me`       | Bearer | —                                               | `{ "status": 200, "user": UserProfile }`                                |
-| GET    | `/auth/isme`     | Bearer | —                                               | `{ "status": 200, "user": UserProfile }` — 404 if no token or invalid   |
+| GET    | `/auth/isme`     | Bearer + `X-Refresh-Token` | —                        | `{ "status": 200, "user": UserProfile }` or `{ "status": 200, "user": UserProfile, "access_token": string, "expires_in": number }` — 404 if nothing works |
 | PUT    | `/auth/profile`  | Bearer | `{ "display_name"?: string, "skills"?: string[], … }` | `{ "status": 200, "message": "Profile updated" }`                 |
 | PUT    | `/auth/password` | Bearer | `{ "current_password": string, "new_password": string }` | `{ "status": 200, "message": "Password updated" }`               |
 | DELETE | `/auth/account`  | Bearer | —                                               | `{ "status": 200, "message": "Account deleted" }`                       |
@@ -79,8 +79,12 @@ No auth required.
 - Returns the full `UserProfile` for the authenticated user.
 
 **isme**  
-- Same profile response as `/auth/me`, but returns **404** instead of 401 when the token is missing or invalid.  
-- Use this to silently check if a user is still logged in (no error UI needed on 404).
+- Silent session check. Returns the user profile or 404 — no error UI needed on failure.  
+- **Two-header auth**: send `Authorization: Bearer <accessToken>` and optionally `X-Refresh-Token: <refreshToken>`.  
+  - If the access token is valid → returns `{ status: 200, user }`.  
+  - If the access token is expired but `X-Refresh-Token` is valid → rotates the token server-side and returns `{ status: 200, user, access_token, expires_in }`.  
+  - If neither works → `{ status: 404, error: "User not found" }`.  
+- The frontend should call this on app start with both headers and store the new `access_token` if one is returned. No separate `/auth/refresh` call needed.
 
 **profile**  
 - PATCH-like `PUT` — send only the fields you want to change.  
@@ -280,8 +284,10 @@ Optional request body:
 
 | Method | Path | Auth | Body | Returns |
 |--------|------|------|------|---------|
-| POST | `/resume/upload` | Bearer | `{ resume_text }` or `{ file_data, file_type }` | `{ profile }` |
+| POST | `/resume/upload` | Bearer | `{ resume_text }` or `{ file_data, file_type }` | `{ profile, assessment? }` |
 | GET | `/resume/file` | Bearer | — | `{ status: 200, url: string }` |
+| POST | `/resume/improve` | Bearer | `{ message }` | `{ resume_text, score, changes, issues, suggestions }` |
+| POST | `/resume/export` | Bearer | — | `{ status: 200, url: string }` |
 
 **`resume_text`**: raw text extracted by the frontend (easiest).  
 **`file_data` + `file_type`**: base64-encoded file content + `"pdf"` or `"txt"`. Server extracts text server-side.
@@ -298,7 +304,8 @@ Pipeline on upload:
 6. Saves profile fields and `resume_file_type`
 7. Generates a resume embedding (384-dim) for semantic job search
 8. Bumps `resume_version`
-9. Returns the structured profile
+9. Runs ATS assessment via LLM (`resumeScore`) — score + issues + suggestions
+10. Returns the structured profile + assessment
 
 ```json
 {
@@ -313,7 +320,22 @@ Pipeline on upload:
     "experience_hint": "incl. 2 internships",
     "salary_target": "₦400k – ₦700k / mo",
     "skills": ["TypeScript", "React", "Go"],
-    "resume_file_type": "pdf"
+    "resume_file_type": "pdf",
+    "resume_score": 72
+  },
+  "assessment": {
+    "score": 72,
+    "summary": "Solid foundation but needs more quantifiable achievements.",
+    "issues": [
+      "Weak action verbs — 60% of bullets start with 'Responsible for' or 'Helped'",
+      "No numerical impact metrics in 4 of 6 role entries",
+      "Missing keywords for ATS: 'TypeScript', 'CI/CD', 'agile'"
+    ],
+    "suggestions": [
+      "Replace 'Responsible for' with past-tense action verbs (delivered, built, optimized)",
+      "Add 1–2 quantifiable outcomes per role (% improvements, $ amounts, time saved)",
+      "Add a Technical Skills section with proficiency levels"
+    ]
   }
 }
 ```
@@ -332,6 +354,69 @@ Pipeline on upload:
 Errors:
 - `401` if auth is missing/invalid
 - `404` if the user has no uploaded resume file
+
+---
+
+### Improve resume
+
+`POST /api/resume/improve`
+
+Sends a natural language instruction to rewrite the stored resume with Google XYZ format ("Accomplished X by doing Y resulting in Z"), one page, ATS-friendly. Returns the rewritten text, a re-score, and a list of changes made.
+
+Request (auth required):
+```json
+{
+  "message": "Make my summary stronger and add more quantifiable metrics"
+}
+```
+
+Response:
+```json
+{
+  "status": 200,
+  "resume_text": "…rewritten full resume…",
+  "score": 88,
+  "changes": [
+    "Rewrote summary to highlight 3 years of full-stack experience with customer impact",
+    "Added quantifiable metrics to frontend role: 'Reduced load times by 40%'",
+    "Replaced weak action verbs with past-tense achievements"
+  ],
+  "issues": ["Missing 'TypeScript' keyword in skills section"],
+  "suggestions": ["Add a Certifications section"]
+}
+```
+
+Errors:
+- `401` if auth is missing/invalid
+- `400` if `message` is missing or empty
+- `500` if the LLM call fails
+
+---
+
+### Export resume as PDF
+
+`POST /api/resume/export`
+
+Generates a PDF of the stored resume in Google XYZ format, uploads it to Supabase Storage (`{userId}/generated/resume.pdf`), and returns a signed download URL.
+
+Request (auth required): no body needed.
+
+Response:
+```json
+{
+  "status": 200,
+  "url": "https://...signed-pdf-url..."
+}
+```
+
+Errors:
+- `401` if auth is missing/invalid
+- `404` if the user has no stored resume text
+- `500` if PDF generation or storage upload fails
+
+**Caching**: The PDF is generated on each request. The signed URL is temporary — request a fresh one each time the user wants to download.
+
+---
 
 After upload, the user's profile is fully populated. `GET /auth/me` will include all these fields, and `POST /jobs/match` will work (it needs the resume embedding). The public `POST /jobs/search` endpoint does not require a resume. Mapped to UI:
 
@@ -383,6 +468,7 @@ interface UserProfile {
   resume_text?: string;
   resume_file_type?: "pdf" | "txt";
   resume_version?: string;
+  resume_score?: number;
 }
 
 interface ChatResponse {
@@ -456,6 +542,7 @@ interface Application {
 ```javascript
 const BASE = "https://hroute-server.vercel.app/api";
 let token = null;
+let refreshToken = null;
 
 // 1. Log in (or register)
 async function login(email, password) {
@@ -467,20 +554,24 @@ async function login(email, password) {
   const data = await res.json();
   if (data.access_token) {
     token = data.access_token;
+    refreshToken = data.refresh_token;
     console.log("Logged in as", email);
   } else {
     throw new Error(data.error);
   }
 }
 
-// 2. Check if your token is still valid (returns profile or 404)
+// 2. Silent session check — returns profile or 404, optionally refreshes the token
 async function checkSession() {
-  if (!token) return null;
-  const res = await fetch(`${BASE}/auth/isme`, {
-    headers: { Authorization: `Bearer ${token}` },
-  });
-  if (res.status === 404) { token = null; return null; }
-  return res.json(); // { status: 200, user: UserProfile }
+  if (!token && !refreshToken) return null;
+  const headers = {} as Record<string, string>;
+  if (token) headers.Authorization = `Bearer ${token}`;
+  if (refreshToken) headers["X-Refresh-Token"] = refreshToken;
+  const res = await fetch(`${BASE}/auth/isme`, { headers });
+  if (res.status === 404) { token = null; refreshToken = null; return null; }
+  const data = await res.json();
+  if (data.access_token) token = data.access_token; // rotated token
+  return data; // { status: 200, user, access_token?, expires_in? }
 }
 
 // 3. Fetch recent jobs (no auth needed — random active browse)
@@ -532,9 +623,33 @@ async function getResumeFileUrl() {
   return res.json(); // { status, url?, error? }
 }
 
+// 8. Resume improve — rewrite with instruction (auth required)
+async function improveResume(message) {
+  const res = await fetch(`${BASE}/resume/improve`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${token}`,
+    },
+    body: JSON.stringify({ message }),
+  });
+  return res.json(); // { status, resume_text, score, changes, issues, suggestions }
+}
+
+// 9. Resume export — generate PDF (auth required)
+async function exportResumePdf() {
+  const res = await fetch(`${BASE}/resume/export`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  return res.json(); // { status, url }
+}
+
 // Example usage
 async function main() {
   await login("user@example.com", "password123");
+  const session = await checkSession();
+  console.log(session ? "Session valid" : "Session expired");
   const recent = await getRecentJobs();
   console.log(`${recent.length} recent jobs`);
   const results = await searchJobs("react developer");

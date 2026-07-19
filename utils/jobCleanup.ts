@@ -104,8 +104,10 @@ function formatDescription(description: string): string {
 }
 
 function inferSkillsFromText(description: string): readonly string[] {
-  const lower = description.toLowerCase();
-  return TECH_SKILL_KEYWORDS.filter((skill) => lower.includes(skill));
+  return TECH_SKILL_KEYWORDS.filter((skill) => {
+    const escaped = skill.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    return new RegExp(`\\b${escaped}\\b`, "i").test(description);
+  });
 }
 
 function inferRemoteFromText(description: string): CleanupRemoteStatus {

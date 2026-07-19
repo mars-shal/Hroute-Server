@@ -218,6 +218,27 @@ class Database {
     }
   }
 
+  async getGeneratedResumeUrl(token: string): Promise<ApiResponse & { url?: string }> {
+    const claims = await this.verifyToken(token);
+    if (!claims) return { success: false, response: 'Invalid token', status: 401 };
+
+    try {
+      const userId = claims.sub;
+      if (!userId) return { status: 401, response: 'User ID not found' };
+
+      const filePath = `${userId}/generated/resume.pdf`;
+      const { data, error } = await this.supabase.storage
+        .from('user-data')
+        .createSignedUrl(filePath, 3600);
+
+      if (error) throw error;
+      return { status: 200, url: data.signedUrl };
+    } catch (e) {
+      logger.error(`[getGeneratedResumeUrl] Error: ${e}`);
+      return { status: 500, response: String(e) };
+    }
+  }
+
   // ── Generic CRUD ──────────────────────────────────────────────
 
   async getData(token: string, table: string): Promise<ApiResponse> {
@@ -896,6 +917,7 @@ export type DatabaseLike = Pick<
   | "deleteFile"
   | "uploadResumeFile"
   | "getResumeSignedUrl"
+  | "getGeneratedResumeUrl"
   | "getData"
   | "insertData"
   | "createUser"

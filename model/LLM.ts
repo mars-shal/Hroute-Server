@@ -298,6 +298,101 @@ class LLM {
     await log(`[LLM] matchResumeToJob result: ${result.slice(0, 300)}`);
     return result;
   }
+
+  async resumeScore(
+    resumeText: string,
+  ): Promise<{
+    score: number;
+    summary: string;
+    issues: Array<{ category: string; severity: string; description: string }>;
+    suggestions: string[];
+  }> {
+    logger.info(`[LLM] resumeScore (text=${resumeText.length} chars)`);
+    await log(`[LLM] resumeScore starting`);
+    const result = await this.structured(
+      `You are an ATS resume analyzer. Score this resume from 0.0 to 1.0.
+      Criteria:
+      - ATS compatibility: standard section headers (Experience, Education, Skills), no tables/columns, clean formatting
+      - Content quality: quantifiable achievements, action verbs, Google XYZ format (Accomplished X by doing Y resulting in Z)
+      - Completeness: contact info, summary/objective, skills, experience with dates, education
+      - Conciseness: one page, no fluff, relevant content only
+
+      Resume:
+      ${resumeText.slice(0, 6000)}
+
+      Return JSON with:
+      - score: number (0.0-1.0)
+      - summary: string (one-sentence assessment)
+      - issues: array of { category: "ats"|"content"|"format"|"completeness", severity: "high"|"medium"|"low", description: string }
+      - suggestions: string[] (actionable improvement tips)`,
+      (raw: string) => {
+        const cleaned = raw.replace(/```(?:json)?\s*/gi, "").trim();
+        return JSON.parse(cleaned) as {
+          score: number;
+          summary: string;
+          issues: Array<{ category: string; severity: string; description: string }>;
+          suggestions: string[];
+        };
+      },
+      { temperature: 0.1, max_tokens: 2048 },
+    );
+    logger.info(`[LLM] resumeScore done — score=${result.score}`);
+    await log(`[LLM] resumeScore result: score=${result.score} issues=${result.issues.length}`);
+    return result;
+  }
+
+  async improveResume(
+    resumeText: string,
+    instruction: string,
+  ): Promise<{
+    resume_text: string;
+    changes: string[];
+    score: number;
+    issues: Array<{ category: string; severity: string; description: string }>;
+    suggestions: string[];
+  }> {
+    logger.info(`[LLM] improveResume (text=${resumeText.length} chars)`);
+    await log(`[LLM] improveResume starting`);
+    const result = await this.structured(
+      `You are a professional resume writer. Rewrite the resume below in Google XYZ format:
+      "Accomplished X by doing Y resulting in Z"
+
+      Requirements:
+      - Google XYZ format for EVERY bullet point
+      - One page maximum — trim irrelevant content
+      - ATS-friendly: standard section headers, clean markdown, no tables
+      - Quantifiable achievements with metrics
+      - Keep all factual information accurate — do not fabricate numbers
+      - Use strong action verbs (delivered, increased, reduced, led, built)
+
+      User's improvement request:
+      ${instruction}
+
+      Current resume:
+      ${resumeText.slice(0, 6000)}
+
+      Return JSON with:
+      - resume_text: string (the FULL rewritten resume as clean markdown)
+      - changes: string[] (list of what was changed)
+      - score: number (new ATS score 0.0-1.0)
+      - issues: array of { category: string, severity: string, description: string }
+      - suggestions: string[]`,
+      (raw: string) => {
+        const cleaned = raw.replace(/```(?:json)?\s*/gi, "").trim();
+        return JSON.parse(cleaned) as {
+          resume_text: string;
+          changes: string[];
+          score: number;
+          issues: Array<{ category: string; severity: string; description: string }>;
+          suggestions: string[];
+        };
+      },
+      { temperature: 0.3, max_tokens: 4096 },
+    );
+    logger.info(`[LLM] improveResume done — score=${result.score} changes=${result.changes.length}`);
+    await log(`[LLM] improveResume result: score=${result.score} changes=${result.changes.join(", ").slice(0, 200)}`);
+    return result;
+  }
 }
 
 export { LLM };

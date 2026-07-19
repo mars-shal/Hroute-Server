@@ -3,17 +3,56 @@ import type { DatabaseLike } from '../model/database.js';
 import { EmbeddingService } from '../utils/embedding.js';
 import { LLM } from '../model/LLM.js';
 import { log, logger } from '../utils/logger.js';
+import markdownpdf from 'markdown-pdf';
 
 const MAX_RESUME_FILE_BYTES = 2 * 1024 * 1024;
 const MAX_RESUME_FILE_BASE64_CHARS = Math.ceil(MAX_RESUME_FILE_BYTES / 3) * 4;
 const MAX_RESUME_LLM_TEXT_CHARS = 8_000;
 const MAX_RESUME_EMBED_TEXT_CHARS = 2_000;
 
+type ResumeIssue = { category: string; severity: string; description: string };
+
+type ResumeAssessment = {
+  score: number;
+  summary: string;
+  issues: ResumeIssue[];
+  suggestions: string[];
+};
+
 interface UploadResult {
   status: number;
   profile?: Record<string, unknown>;
+  assessment?: ResumeAssessment | null;
   url?: string;
   error?: string;
+}
+
+type ImproveResult = {
+  status: number;
+  resume_text?: string;
+  score?: number;
+  changes?: string[];
+  issues?: ResumeIssue[];
+  suggestions?: string[];
+  error?: string;
+};
+
+type ExportResult = {
+  status: number;
+  url?: string;
+  error?: string;
+};
+
+/** Convert markdown to PDF buffer via markdown-pdf */
+function mdToPdf(md: string): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    markdownpdf()
+      .from.string(md)
+      .to.buffer((err: Error | null, buf: Buffer) => {
+        if (err) reject(err);
+        else resolve(buf);
+      });
+  });
 }
 
 class ResumeController {
@@ -103,15 +142,27 @@ class ResumeController {
         }
       }
 
+      let assessment: ResumeAssessment | null = null;
+      try {
+        assessment = await this.llm.resumeScore(resumeText);
+        if (assessment) {
+          profilePayload.resume_score = assessment.score;
+          await this.db.updateUser(token, { resume_score: assessment.score }).catch(() => {});
+        }
+        logger.info(`[Resume] Assessment complete — score=${assessment?.score ?? '?'}`);
+      } catch (assessErr) {
+        logger.warn(`[Resume] Assessment LLM call failed (non-fatal): ${assessErr}`);
+      }
+
       const profile: Record<string, unknown> = {
         resume_text: resumeText,
         ...profilePayload,
       };
 
       const skillCount = (extracted.skills as string[] | undefined)?.length ?? 0;
-      logger.info(`[Resume] Upload + extraction complete`);
-      await log(`[Resume] success: skills=${skillCount}`);
-      return { status: 200, profile };
+      logger.info(`[Resume] Upload + extraction + assessment complete`);
+      await log(`[Resume] success: skills=${skillCount} score=${assessment?.score ?? '?'}`);
+      return { status: 200, profile, assessment };
     } catch (e) {
       const msg = String(e);
       logger.error(`[Resume] Error: ${msg}`);
@@ -137,6 +188,97 @@ class ResumeController {
   private async extractPdfText(data: Uint8Array): Promise<string> {
     const { text } = await extractText(data);
     return String(text ?? '');
+  }
+
+  async improve(token: string, message: string): Promise<ImproveResult> {
+    try {
+      if (!message || message.trim().length < 2) {
+        return { status: 400, error: 'Improvement message required' };
+      }
+
+      const profile = await this.db.getUser(token);
+      if (profile.status !== 200) {
+        return { status: 401, error: 'Invalid token' };
+      }
+
+      const resumeText = String(profile.resume_text ?? '');
+      if (!resumeText || resumeText.trim().length < 20) {
+        return { status: 400, error: 'No resume found. Upload a resume first.' };
+      }
+
+      const result = await this.llm.improveResume(resumeText, message);
+
+      const update: Record<string, unknown> = {
+        resume_text: result.resume_text,
+        resume_score: result.score,
+      };
+      const saveResult = await this.db.updateUser(token, update);
+      if (saveResult.status !== 200) {
+        logger.warn(`[Resume] improve: failed to persist updated resume: ${saveResult.response}`);
+      }
+
+      logger.info(`[Resume] improve complete — score=${result.score} changes=${result.changes.length}`);
+      await log(`[Resume] improve: score=${result.score} changes=${result.changes.join(", ").slice(0, 100)}`);
+
+      return {
+        status: 200,
+        resume_text: result.resume_text,
+        score: result.score,
+        changes: result.changes,
+        issues: result.issues,
+        suggestions: result.suggestions,
+      };
+    } catch (e) {
+      const msg = String(e);
+      logger.error(`[Resume] improve error: ${msg}`);
+      return { status: 500, error: msg };
+    }
+  }
+
+  async exportPdf(token: string): Promise<ExportResult> {
+    try {
+      const profile = await this.db.getUser(token);
+      if (profile.status !== 200) {
+        return { status: 401, error: 'Invalid token' };
+      }
+
+      const resumeText = String(profile.resume_text ?? '');
+      if (!resumeText || resumeText.trim().length < 20) {
+        return { status: 400, error: 'No resume found. Upload or create a resume first.' };
+      }
+
+      const md = `# ${profile.display_name ?? 'Resume'}\n\n${resumeText}`;
+
+      logger.info(`[Resume] exportPdf: converting ${md.length} chars to PDF`);
+      const pdfBuf = await mdToPdf(md);
+
+      const pdfBase64 = pdfBuf.toString('base64');
+      const uploadResult = await this.db.uploadFile(token, {
+        fileData: pdfBase64,
+        filePath: 'generated',
+        fileName: 'resume.pdf',
+        contentType: 'application/pdf',
+      });
+
+      if (uploadResult.status !== 200) {
+        logger.error(`[Resume] exportPdf: storage upload failed: ${uploadResult.response ?? 'unknown'}`);
+        return { status: 500, error: uploadResult.response ?? 'Failed to upload PDF' };
+      }
+
+      const signedUrlResult = await this.db.getGeneratedResumeUrl(token);
+      const url = signedUrlResult.status === 200 && signedUrlResult.url
+        ? signedUrlResult.url
+        : null;
+
+      logger.info(`[Resume] exportPdf complete — ${pdfBuf.length} bytes`);
+      await log(`[Resume] exportPdf: ${pdfBuf.length} bytes`);
+
+      return { status: 200, url: url ?? undefined };
+    } catch (e) {
+      const msg = String(e);
+      logger.error(`[Resume] exportPdf error: ${msg}`);
+      return { status: 500, error: msg };
+    }
   }
 
   private boundResumeText(text: string): string {
