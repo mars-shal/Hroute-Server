@@ -216,6 +216,13 @@ class ResumeBuilderController {
       // LLM returned plain text — use as-is
     }
 
+    const now = new Date().toISOString();
+    updatedSession.chat_history = [
+      ...updatedSession.chat_history,
+      { role: "user", content: message, timestamp: now },
+      { role: "assistant", content: chatMessage, timestamp: now },
+    ];
+
     // Recalculate ATS score
     const resumeText = this.generateResumeText(updatedSession);
     const atsScore = scoreResume(resumeText);
