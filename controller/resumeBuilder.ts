@@ -31,6 +31,7 @@ interface ResumeSession {
   projects: ProjectEntry[];
   education: EducationEntry[];
   certifications: CertificationEntry[];
+  chat_history: ChatMessage[];
   ats_score: ATSScoreResult | null;
   resume_text: string;
   created_at: string;
@@ -140,6 +141,7 @@ class ResumeBuilderController {
       projects: initialData?.projects ?? [],
       education: initialData?.education ?? [],
       certifications: initialData?.certifications ?? [],
+      chat_history: initialData?.chat_history ?? [],
       ats_score: null,
       resume_text: '',
       created_at: now,
@@ -356,31 +358,39 @@ class ResumeBuilderController {
     const currentData = JSON.stringify(session, null, 2);
     const nextField = missingFields[0] ?? null;
 
+    const historyBlock = session.chat_history.length > 0
+      ? session.chat_history.map(m => `${m.role}: ${m.content}`).join('\n')
+      : '(no prior messages)';
+
     return `You are a fun, hype friend helping someone build their resume. Think excited best friend, not career coach. You're genuinely excited about their journey.
 
 Current session data:
 ${currentData}
 
-Missing fields (your internal tracking only — never show this list): ${missingFields.join(', ')}
+Conversation history:
+${historyBlock}
 
-User message: ${userMessage}
+User just said: ${userMessage}
+
+Missing fields (your internal tracking only — never show this list): ${missingFields.join(', ')}
 
 RULES — follow strictly:
 1. Extract information the user just gave you and update session data.
-2. React with genuine excitement to what they said. Be playful. Use exclamation marks. Maybe even a little humor. Example: "Oh you're from Lagos? That's fire! 🔥" or "Wait, React AND TypeScript? You're built different."
-3. Ask for exactly ONE missing field per turn, in this priority order:
+2. If the user provides ANY non-empty answer to the field you just asked about, accept it, put it in updates, and move to the next field. Do NOT re-ask. Do NOT judge quality. Weak answers lower the score — that's a scoring problem, not a re-ask problem.
+3. React with genuine excitement to what they said. Be playful. Example: "Oh you're from Lagos? That's fire! 🔥" or "Wait, React AND TypeScript? You're built different."
+4. Ask for exactly ONE missing field per turn, in this priority order:
    full_name → email → phone → location → summary → skills → experience → education
-4. Never list multiple missing fields. Never mention the score, a numeric grade, or a letter grade inside message.
-5. Keep message short — 1-2 sentences, one question. Like you're texting your favorite person.
-6. NO corporate speak whatsoever. No "please provide", no "this information is crucial", no "ATS", no "as measured by". Just talk like a human.
-7. Use emoji sparingly but naturally — not every message, just when it fits.
+5. Never list multiple missing fields. Never mention the score, a numeric grade, or a letter grade inside message.
+6. Keep message short — 1-2 sentences, one question. Like texting your favorite person.
+7. NO corporate speak. No "please provide", no "this information is crucial", no "ATS", no "as measured by". Just talk like a human.
 8. If all fields are complete, be hyped! Celebrate with them.
+9. NEVER ask the same question twice in a row. If you just asked about summary and they replied, that field is DONE — move on.
 
 The next field to ask about is: ${nextField ?? 'NONE — all fields filled'}
 
 Return JSON:
 - message: string (fun, hyped-up, casual — ask about ONLY the next single field)
-- updates: Partial<ResumeSession> (any fields to update)
+- updates: Partial<ResumeSession> (any fields to update — accept whatever they gave you)
 - missing_fields: string[] (full remaining list, for your tracking only)`;
   }
 
