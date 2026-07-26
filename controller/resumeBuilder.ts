@@ -197,11 +197,18 @@ class ResumeBuilderController {
     // Build context for LLM
     const context = this.buildChatContext(session, missingFields, message);
 
-    // Call LLM for response
-    const llmResponse = await this.llm.reason(context, {
-      temperature: 0.3,
-      max_tokens: 2048,
-    });
+    // Call LLM for response — use complete() directly, not reason(), to avoid
+    // the "reasoning engine" system prompt overriding our casual tone instructions
+    const llmResponse = await this.llm.complete(
+      [
+        {
+          role: "system",
+          content: "You are a fun, hype friend helping someone build their resume. Always respond with valid JSON only — no markdown fences, no explanation outside the JSON.",
+        },
+        { role: "user", content: context },
+      ],
+      { temperature: 0.3, max_tokens: 2048 },
+    );
 
     // Parse LLM response and update session
     const updatedSession = await this.processLlmResponse(session, llmResponse, message);
@@ -218,7 +225,7 @@ class ResumeBuilderController {
 
     const now = new Date().toISOString();
     updatedSession.chat_history = [
-      ...updatedSession.chat_history,
+      ...(updatedSession.chat_history ?? []),
       { role: "user", content: message, timestamp: now },
       { role: "assistant", content: chatMessage, timestamp: now },
     ];
@@ -365,8 +372,8 @@ class ResumeBuilderController {
     const currentData = JSON.stringify(session, null, 2);
     const nextField = missingFields[0] ?? null;
 
-    const historyBlock = session.chat_history.length > 0
-      ? session.chat_history.map(m => `${m.role}: ${m.content}`).join('\n')
+    const historyBlock = (session.chat_history ?? []).length > 0
+      ? (session.chat_history ?? []).map(m => `${m.role}: ${m.content}`).join('\n')
       : '(no prior messages)';
 
     return `You are a fun, hype friend helping someone build their resume. Think excited best friend, not career coach. You're genuinely excited about their journey.
@@ -423,6 +430,17 @@ Return JSON:
             (updatedSession as Record<string, unknown>)[key] = value;
           }
         }
+      }
+
+      // Normalize skills — LLM may return a string instead of SkillCategory[]
+      if (typeof updatedSession.skills === "string") {
+        const raw = updatedSession.skills as unknown as string;
+        updatedSession.skills = [{ name: "General", skills: raw.split(/[,;]+/).map(s => s.trim()).filter(Boolean) }];
+      } else if (Array.isArray(updatedSession.skills)) {
+        updatedSession.skills = updatedSession.skills.map((s: unknown) => {
+          if (typeof s === "string") return { name: "General", skills: [s] };
+          return s;
+        });
       }
 
       return updatedSession;
