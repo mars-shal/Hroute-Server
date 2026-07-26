@@ -204,6 +204,16 @@ class ResumeBuilderController {
     // Parse LLM response and update session
     const updatedSession = await this.processLlmResponse(session, llmResponse, message);
 
+    // Extract chat message from parsed LLM response (strip code fences, parse JSON)
+    let chatMessage = llmResponse;
+    try {
+      const cleaned = llmResponse.replace(/```(?:json)?\s*/gi, "").trim();
+      const parsed = JSON.parse(cleaned) as { message?: string };
+      if (parsed.message) chatMessage = parsed.message;
+    } catch {
+      // LLM returned plain text — use as-is
+    }
+
     // Recalculate ATS score
     const resumeText = this.generateResumeText(updatedSession);
     const atsScore = scoreResume(resumeText);
@@ -226,7 +236,7 @@ class ResumeBuilderController {
 
     // Generate response message
     const responseMessage = this.generateResponseMessage(
-      llmResponse,
+      chatMessage,
       atsScore,
       updatedMissingFields,
       isComplete
