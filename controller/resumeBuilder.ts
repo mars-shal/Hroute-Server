@@ -354,28 +354,32 @@ class ResumeBuilderController {
     userMessage: string
   ): string {
     const currentData = JSON.stringify(session, null, 2);
-    const missingFieldsStr = missingFields.join(', ');
+    const nextField = missingFields[0] ?? null;
 
     return `You are an ATS resume builder assistant. Help the user build an ATS-optimized resume.
 
 Current session data:
 ${currentData}
 
-Missing fields: ${missingFieldsStr}
+Missing fields (full list for tracking): ${missingFields.join(', ')}
 
 User message: ${userMessage}
 
-Instructions:
-1. Extract relevant information from the user's message
-2. Update the session data accordingly
-3. Ask clarifying questions for missing information
-4. Explain why certain information is important for ATS scoring
-5. Use Google XYZ format for experience bullets: "Accomplished [X] as measured by [Y], by doing [Z]"
+RULES — follow strictly:
+1. Extract relevant information from the user's message and update session data.
+2. Ask for exactly ONE missing field per turn — the next one in this priority order:
+   full_name → email → phone → location → summary → skills → experience → education
+3. Never list multiple missing fields in your message to the user.
+4. Once the user provides a field, move to the next one in the SAME response.
+5. If all fields are complete, tell the user their resume is ready.
+6. Use Google XYZ format for experience bullets: "Accomplished [X] as measured by [Y], by doing [Z]"
 
-Return a JSON response with:
-- message: string (your response to the user)
+The next field to ask about is: ${nextField ?? 'NONE — all fields filled'}
+
+Return JSON:
+- message: string (your response to the user — ask about ONLY the next single field)
 - updates: Partial<ResumeSession> (any fields to update)
-- missing_fields: string[] (fields still needed)`;
+- missing_fields: string[] (full remaining list, for tracking)`;
   }
 
   private async processLlmResponse(
@@ -524,19 +528,10 @@ Return a JSON response with:
   ): string {
     let message = llmMessage;
 
-    // Add ATS score info
     message += `\n\n**ATS Score: ${atsScore.score}/100 (${atsScore.grade})**`;
 
-    // Add missing fields info
-    if (missingFields.length > 0) {
-      message += `\n\n**Still needed:** ${missingFields.join(', ')}`;
-    }
-
-    // Add completion message
     if (isComplete) {
       message += '\n\n✅ Your resume is complete! Click "Build" to generate your PDF.';
-    } else {
-      message += '\n\nPlease provide the missing information to continue.';
     }
 
     return message;
