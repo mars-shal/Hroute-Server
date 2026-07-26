@@ -361,7 +361,7 @@ Errors:
 
 `POST /api/resume/improve`
 
-Sends a natural language instruction to rewrite the stored resume with Google XYZ format ("Accomplished X by doing Y resulting in Z"), one page, ATS-friendly. Returns a chat-friendly summary of what changed, the new score, and any remaining issues. The full rewritten resume is saved to the database but not returned in the response.
+Sends a natural language instruction to rewrite the stored resume with Google XYZ format ("Accomplished X by doing Y resulting in Z"), one page, ATS-friendly. Returns the rewritten text, a re-score, and a list of changes made.
 
 Request (auth required):
 ```json
@@ -374,7 +374,7 @@ Response:
 ```json
 {
   "status": 200,
-  "reply": "Your resume has been updated. New ATS score: **88**/100.\n\n**Changes made:**\n- Rewrote summary...\n- Added quantifiable metrics...\n\n**Remaining issues:**\n- [medium] Missing 'TypeScript' keyword...\n\n**Suggestions:**\n- Add a Certifications section",
+  "resume_text": "…rewritten full resume…",
   "score": 88,
   "changes": [
     "Rewrote summary to highlight 3 years of full-stack experience with customer impact",
