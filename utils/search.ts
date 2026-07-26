@@ -45,4 +45,4 @@ export const SEARCHURLS = [
 
 // Feed source config now lives in jobFeeds.ts (FEED_SOURCES, isFeedSource) —
 // single source of truth so the domain-match list and fetch config can't drift.
-export { FEED_SOURCES, isFeedSource } from "./jobFeeds.ts";
+export { FEED_SOURCES, isFeedSource } from "./jobFeeds.js";
