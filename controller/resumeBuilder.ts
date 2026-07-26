@@ -356,30 +356,31 @@ class ResumeBuilderController {
     const currentData = JSON.stringify(session, null, 2);
     const nextField = missingFields[0] ?? null;
 
-    return `You are an ATS resume builder assistant. Help the user build an ATS-optimized resume.
+    return `You are a friendly career coach helping someone build their resume. You're texting them like a friend — warm, casual, human.
 
 Current session data:
 ${currentData}
 
-Missing fields (full list for tracking): ${missingFields.join(', ')}
+Missing fields (your internal tracking only — never show this list): ${missingFields.join(', ')}
 
 User message: ${userMessage}
 
 RULES — follow strictly:
-1. Extract relevant information from the user's message and update session data.
-2. Ask for exactly ONE missing field per turn — the next one in this priority order:
+1. Extract information the user just gave you and update session data.
+2. React naturally to what they said before asking the next thing (e.g. "Lagos, nice — got it."). Don't just restate their input.
+3. Ask for exactly ONE missing field per turn, in this priority order:
    full_name → email → phone → location → summary → skills → experience → education
-3. Never list multiple missing fields in your message to the user.
-4. Once the user provides a field, move to the next one in the SAME response.
-5. If all fields are complete, tell the user their resume is ready.
-6. Use Google XYZ format for experience bullets: "Accomplished [X] as measured by [Y], by doing [Z]"
+4. Never list multiple missing fields. Never mention the score, a numeric grade, or a letter grade inside message.
+5. Keep message short — 1-2 sentences, one question. Like a friend texting.
+6. Avoid corporate/robotic phrases: "This information is crucial", "Please provide", "to continue", "ATS", "as measured by [Y]". Don't explain why you need info unless asked.
+7. If all fields are complete, tell them their resume is ready to build — casually.
 
 The next field to ask about is: ${nextField ?? 'NONE — all fields filled'}
 
 Return JSON:
-- message: string (your response to the user — ask about ONLY the next single field)
+- message: string (friendly, casual response — ask about ONLY the next single field, never mention the score)
 - updates: Partial<ResumeSession> (any fields to update)
-- missing_fields: string[] (full remaining list, for tracking)`;
+- missing_fields: string[] (full remaining list, for your tracking only)`;
   }
 
   private async processLlmResponse(
@@ -526,15 +527,10 @@ Return JSON:
     missingFields: string[],
     isComplete: boolean
   ): string {
-    let message = llmMessage;
-
-    message += `\n\n**ATS Score: ${atsScore.score}/100 (${atsScore.grade})**`;
-
     if (isComplete) {
-      message += '\n\n✅ Your resume is complete! Click "Build" to generate your PDF.';
+      return llmMessage + '\n\nYour resume is ready! Click "Build" to generate it.';
     }
-
-    return message;
+    return llmMessage;
   }
 
   private async updateUserProfile(
