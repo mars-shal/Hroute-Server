@@ -15,6 +15,10 @@ type ApiHandlerData = {
   timeout: number;
 };
 
+function heapUsedMB(): number {
+  return Math.round(process.memoryUsage().heapUsed / 1024 / 1024);
+}
+
 class Crawler {
   private apiKey: string;
   private redis: RedisModel;
@@ -175,7 +179,6 @@ class Crawler {
     await log(`[Crawler] scrapePages starting: ${urls.length} URLs`);
 
     for (const [idx, url] of urls.entries()) {
-      // Throttle: stay within Firecrawl rate limit (~13 req/min) between page scrapes
       if (idx > 0) {
         await new Promise((r) => setTimeout(r, 5000));
       }
@@ -202,13 +205,12 @@ class Crawler {
         await log(`[Crawler] scrapePages NO markdown: ${url}`);
       }
 
-      // Log batch progress every 25 pages
       if (idx > 0 && idx % 25 === 0) {
-        logger.info(`[Crawler] scrapePages progress: ${idx + 1}/${urls.length} (${results.length} scraped so far)`);
+        logger.info(`[Crawler] scrapePages progress: ${idx + 1}/${urls.length} (${results.length} scraped so far) [heap=${heapUsedMB()}MB]`);
       }
     }
 
-    logger.info(`[Crawler] scrapePages exit: ${results.length}/${urls.length} pages scraped`);
+    logger.info(`[Crawler] scrapePages exit: ${results.length}/${urls.length} pages scraped [heap=${heapUsedMB()}MB]`);
     await log(`[Crawler] scrapePages done: ${results.length}/${urls.length} pages`);
     return results;
   }

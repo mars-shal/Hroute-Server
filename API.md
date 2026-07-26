@@ -1,4 +1,4 @@
-# hrout API — Frontend TL;DR
+z# hrout API — Frontend TL;DR
 
 **Base URL**: `https://hroute-server.vercel.app/api`  
 **Auth**: `Authorization: Bearer <access_token>` (required on protected routes)
@@ -385,6 +385,18 @@ Response:
   "suggestions": ["Add a Certifications section"]
 }
 ```
+
+**Pipeline behavior**:
+1. LLM improves content in Google XYZ format
+2. Reasoning step validates compliance
+3. Code fixes structural issues (headers, formatting)
+4. Targeted LLM rewrites for non-compliant sections
+5. Re-score final output
+
+**Response notes**:
+- `changes` includes both content improvements and structural fixes
+- `issues` includes any problems that couldn't be auto-fixed (display as warnings)
+- Score reflects the final re-scored output, not the initial improvement
 
 Errors:
 - `401` if auth is missing/invalid

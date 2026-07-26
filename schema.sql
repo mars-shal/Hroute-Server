@@ -22,6 +22,7 @@ create table if not exists public.jobs (
 );
 
 alter table public.jobs add column if not exists logo_url text;
+alter table public.jobs add column if not exists experience_level text default 'unspecified';
 
 -- Optional: speed up recent-jobs queries and source_url lookups
 create index if not exists jobs_crawled_at_idx on public.jobs (crawled_at desc);
@@ -135,6 +136,7 @@ returns table (
   source_site text,
   posted_date text,
   logo_url text,
+  experience_level text,
   crawled_at timestamptz,
   similarity float
 )
@@ -153,6 +155,7 @@ as $$
     j.source_site,
     j.posted_date,
     j.logo_url,
+    j.experience_level,
     j.crawled_at,
     (1 - (jv.embedding <=> query_embedding))::float as similarity
   from public.job_vectors jv

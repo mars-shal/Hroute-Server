@@ -6,6 +6,7 @@ import { ChatController } from "./chatController.js";
 import { JobApplicationController } from "./jobApplication.js";
 import { JobMaintenanceController } from "./jobMaintenance.js";
 import { ResumeController } from "./resumeController.js";
+import { ResumeBuilderController } from "./resumeBuilder.js";
 import { log, logger } from "../utils/logger.js";
 
 type ApiControllerDeps = {
@@ -14,6 +15,7 @@ type ApiControllerDeps = {
   jobs?: JobApplicationController;
   jobMaintenance?: JobMaintenanceController;
   resume?: ResumeController;
+  resumeBuilder?: ResumeBuilderController;
 };
 
 export function createApiRouter(db: DatabaseLike, deps: ApiControllerDeps = {}): Router {
@@ -23,6 +25,7 @@ export function createApiRouter(db: DatabaseLike, deps: ApiControllerDeps = {}):
   const jobs = deps.jobs ?? new JobApplicationController(db);
   const jobMaintenance = deps.jobMaintenance ?? new JobMaintenanceController(db);
   const resume = deps.resume ?? new ResumeController(db);
+  const resumeBuilder = deps.resumeBuilder ?? new ResumeBuilderController();
 
   // ── Auth routes ──────────────────────────────────────────────
 
@@ -387,6 +390,145 @@ export function createApiRouter(db: DatabaseLike, deps: ApiControllerDeps = {}):
       res.status(result.status).json(result);
     } catch (e) {
       logger.error("[POST /resume/export]", e);
+      res.status(500).json({ error: String(e) });
+    }
+  });
+
+  // ── Resume Builder routes ───────────────────────────────────
+
+  router.post("/resume-builder/session", async (req: Request, res: Response) => {
+    logger.info(`[API] POST /resume-builder/session`);
+    try {
+      const token = extractToken(req);
+      if (!token) {
+        res.status(401).json({ error: "Missing Authorization header" });
+        return;
+      }
+
+      const authResult = await db.authenticateToken(token);
+      if (authResult.status !== 200 || !authResult.userId) {
+        res.status(401).json({ error: "Invalid token" });
+        return;
+      }
+
+      const userId = authResult.userId;
+      const initialData = req.body as Record<string, unknown> | undefined;
+
+      const session = await resumeBuilder.createSession(userId, initialData);
+      logger.info(`[API] POST /resume-builder/session → 200 (session=${session.id})`);
+      res.status(200).json(session);
+    } catch (e) {
+      logger.error("[POST /resume-builder/session]", e);
+      res.status(500).json({ error: String(e) });
+    }
+  });
+
+  router.get("/resume-builder/session/:sessionId", async (req: Request, res: Response) => {
+    logger.info(`[API] GET /resume-builder/session/${req.params.sessionId}`);
+    try {
+      const token = extractToken(req);
+      if (!token) {
+        res.status(401).json({ error: "Missing Authorization header" });
+        return;
+      }
+
+      const { sessionId } = req.params;
+      const session = await resumeBuilder.getSession(sessionId);
+      
+      if (!session) {
+        res.status(404).json({ error: "Session not found" });
+        return;
+      }
+
+      logger.info(`[API] GET /resume-builder/session/${sessionId} → 200`);
+      res.status(200).json(session);
+    } catch (e) {
+      logger.error(`[GET /resume-builder/session/${req.params.sessionId}]`, e);
+      res.status(500).json({ error: String(e) });
+    }
+  });
+
+  router.post("/resume-builder/chat", async (req: Request, res: Response) => {
+    logger.info(`[API] POST /resume-builder/chat`);
+    try {
+      const token = extractToken(req);
+      if (!token) {
+        res.status(401).json({ error: "Missing Authorization header" });
+        return;
+      }
+
+      const { sessionId, message } = req.body as { sessionId?: string; message?: string };
+      if (!sessionId || !message) {
+        res.status(400).json({ error: "sessionId and message required" });
+        return;
+      }
+
+      const response = await resumeBuilder.processMessage(sessionId, message);
+      logger.info(`[API] POST /resume-builder/chat → 200 (score=${response.ats_score.score})`);
+      res.status(200).json(response);
+    } catch (e) {
+      logger.error("[POST /resume-builder/chat]", e);
+      res.status(500).json({ error: String(e) });
+    }
+  });
+
+  router.put("/resume-builder/session/:sessionId", async (req: Request, res: Response) => {
+    logger.info(`[API] PUT /resume-builder/session/${req.params.sessionId}`);
+    try {
+      const token = extractToken(req);
+      if (!token) {
+        res.status(401).json({ error: "Missing Authorization header" });
+        return;
+      }
+
+      const { sessionId } = req.params;
+      const updates = req.body as Record<string, unknown>;
+
+      const session = await resumeBuilder.updateSession(sessionId, updates);
+      logger.info(`[API] PUT /resume-builder/session/${sessionId} → 200`);
+      res.status(200).json(session);
+    } catch (e) {
+      logger.error(`[PUT /resume-builder/session/${req.params.sessionId}]`, e);
+      res.status(500).json({ error: String(e) });
+    }
+  });
+
+  router.post("/resume-builder/generate/:sessionId", async (req: Request, res: Response) => {
+    logger.info(`[API] POST /resume-builder/generate/${req.params.sessionId}`);
+    try {
+      const token = extractToken(req);
+      if (!token) {
+        res.status(401).json({ error: "Missing Authorization header" });
+        return;
+      }
+
+      const { sessionId } = req.params;
+      const result = await resumeBuilder.generateResume(sessionId);
+      
+      logger.info(`[API] POST /resume-builder/generate/${sessionId} → 200 (score=${result.ats_score.score})`);
+      res.status(200).json(result);
+    } catch (e) {
+      logger.error(`[POST /resume-builder/generate/${req.params.sessionId}]`, e);
+      res.status(500).json({ error: String(e) });
+    }
+  });
+
+  router.delete("/resume-builder/session/:sessionId", async (req: Request, res: Response) => {
+    logger.info(`[API] DELETE /resume-builder/session/${req.params.sessionId}`);
+    try {
+      const token = extractToken(req);
+      if (!token) {
+        res.status(401).json({ error: "Missing Authorization header" });
+        return;
+      }
+
+      const { sessionId } = req.params;
+      await resumeBuilder.deleteSession(sessionId);
+      
+      logger.info(`[API] DELETE /resume-builder/session/${sessionId} → 200`);
+      res.status(200).json({ message: "Session deleted" });
+    } catch (e) {
+      logger.error(`[DELETE /resume-builder/session/${req.params.sessionId}]`, e);
       res.status(500).json({ error: String(e) });
     }
   });

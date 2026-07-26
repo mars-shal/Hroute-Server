@@ -1,68 +1,91 @@
-import { ApifyClient } from "apify-client";
+import axios from "axios";
+import robotsParser from "robots-parser";
+import Sitemapper from "sitemapper";
 import { log, logger } from "./logger.js";
 
-const APIFY_ACTOR_ID = "thescrapelab/sitemap-target-url-extractor";
+const TIMEOUT = 15_000;
+const USER_AGENT = "hroute-job-discovery";
 
-/**
- * Discover URLs from a website's sitemaps using the Apify
- * Sitemap URL Finder Actor.
- *
- * Checks robots.txt → sitemap.xml → follows sitemap indexes.
- * Returns clean, deduplicated URLs as found in the sitemap.
- *
- * Requires APIFY_API_TOKEN env var. Returns empty array if not set
- * or if the Actor fails.
- */
+async function fetchSitemapsFromRobots(
+  websiteUrl: string,
+): Promise<string[]> {
+  try {
+    const robotsUrl = new URL("/robots.txt", websiteUrl).href;
+    const res = await axios.get(robotsUrl, {
+      timeout: TIMEOUT,
+      headers: { "User-Agent": USER_AGENT },
+    });
+
+    if (res.status !== 200 || typeof res.data !== "string") return [];
+
+    const robots = robotsParser(robotsUrl, res.data);
+    const sitemaps = robots.getSitemaps();
+    if (sitemaps.length > 0) {
+      logger.info(`[SitemapDiscoverer] Found ${sitemaps.length} sitemaps in robots.txt for ${websiteUrl}`);
+      return sitemaps;
+    }
+  } catch {
+    // robots.txt missing or unparseable — fall through to convention
+  }
+
+  // Convention: try /sitemap.xml directly
+  return [new URL("/sitemap.xml", websiteUrl).href];
+}
+
 export async function discoverSitemapUrls(
   websiteUrl: string,
   options?: {
-    /** Only return URLs containing this text (e.g. "/jobs/", "/careers/") */
     filterText?: string;
-    /** Max URLs to return (default: 200) */
     maxResults?: number;
   },
 ): Promise<string[]> {
-  const token = process.env.APIFY_API_TOKEN;
-  if (!token) {
-    logger.info(`[SitemapDiscoverer] APIFY_API_TOKEN not set, skipping: ${websiteUrl}`);
-    return [];
-  }
-
   logger.info(`[SitemapDiscoverer] entry: ${websiteUrl}`);
   await log(`[SitemapDiscoverer] starting: ${websiteUrl}`);
 
   try {
-    const client = new ApifyClient({ token });
+    const sitemapUrls = await fetchSitemapsFromRobots(websiteUrl);
+    if (sitemapUrls.length === 0) {
+      logger.warn(`[SitemapDiscoverer] No sitemaps found for ${websiteUrl}`);
+      return [];
+    }
 
-    const input = {
-      websites: [{ url: websiteUrl }],
-      includeUrlText: options?.filterText ?? "",
-      maxResults: options?.maxResults ?? 200,
-      maxRequestsPerCrawl: 1000,
-    };
-
-    const run = await client.actor(APIFY_ACTOR_ID).call(input, {
-      waitSecs: 120, // Wait up to 2 min for the Actor to finish
+    const sitemapper = new Sitemapper({
+      timeout: TIMEOUT,
+      retries: 2,
+      concurrency: 10,
     });
 
-    if (!run) {
-      logger.warn(`[SitemapDiscoverer] Actor returned no run: ${websiteUrl}`);
-      return [];
+    const allSites = new Set<string>();
+    for (const sitemapUrl of sitemapUrls) {
+      try {
+        const result = await sitemapper.fetch(sitemapUrl);
+        for (const site of result.sites) {
+          allSites.add(site);
+        }
+        if (result.errors.length > 0) {
+          logger.warn(
+            `[SitemapDiscoverer] ${result.errors.length} parse errors in ${sitemapUrl}`,
+          );
+        }
+      } catch (e) {
+        logger.warn(`[SitemapDiscoverer] Failed to fetch ${sitemapUrl}: ${e}`);
+      }
     }
 
-    if (run.status !== "SUCCEEDED") {
-      logger.warn(`[SitemapDiscoverer] Actor run ${run.id} status: ${run.status}`);
-      return [];
+    let urls = Array.from(allSites);
+
+    if (options?.filterText) {
+      const filter = options.filterText.toLowerCase();
+      urls = urls.filter((u) => u.toLowerCase().includes(filter));
     }
 
-    const { items } = await client
-      .dataset(run.defaultDatasetId)
-      .listItems();
-
-    const urls: string[] = items.map((item: { url?: string }) => item.url).filter(Boolean) as string[];
+    const max = options?.maxResults ?? 200;
+    if (urls.length > max) {
+      urls = urls.slice(0, max);
+    }
 
     logger.info(
-      `[SitemapDiscoverer] ${urls.length} URLs from ${websiteUrl} (run ${run.id})`,
+      `[SitemapDiscoverer] ${urls.length} URLs from ${websiteUrl} (${sitemapUrls.length} sitemaps)`,
     );
     await log(`[SitemapDiscoverer] ${urls.length} URLs from ${websiteUrl}`);
 

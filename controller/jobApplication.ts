@@ -5,8 +5,10 @@ import type { DatabaseLike } from "../model/database.js";
 import { JobMatcher } from "./jobMatcher.js";
 import type { JobMatcherService, MatchFilters, MatchProgressHandler } from "./jobMatcher.js";
 import { log, logger } from "../utils/logger.js";
-import { SEARCHURLS } from "../utils/search.js";
+import { SEARCHURLS, isFeedSource } from "../utils/search.js";
 import { normalizeJobCleanupInput } from "../utils/jobCleanup.js";
+import { isJunkPage, processJobPipeline } from "../utils/jobPipeline.js";
+import { processFeedsInBatches } from "../utils/jobFeeds.js";
 
 /** Strip carriage returns, tabs, zero-width characters from a URL string */
 function cleanUrl(raw: string): string {
@@ -56,6 +58,94 @@ class JobApplicationController {
         logger.info(`[Discover] Processing seed [${seedIdx + 1}/${urls.length}]: ${seedUrl}`);
         await log(`[Discover] Seed ${seedIdx + 1}/${urls.length}: ${seedUrl}`);
 
+        // ── Feed path: free public APIs skip Firecrawl + LLM ──
+        if (isFeedSource(seedUrl)) {
+          logger.info(`[Discover] Feed source: ${seedUrl} — bypassing Firecrawl`);
+          await log(`[Discover] Feed source: ${seedUrl}`);
+
+          const seedHostname = new URL(seedUrl).hostname.replace("www.", "");
+          const embeddingService = await EmbeddingService.getInstance();
+          let seedJobs = 0;
+
+          const { processed, errors: feedErrors } = await processFeedsInBatches(async (feedJob) => {
+            let jobHostname: string;
+            try {
+              jobHostname = new URL(feedJob.source_url).hostname.replace("www.", "");
+            } catch {
+              return;
+            }
+            if (!jobHostname.includes(seedHostname)) return;
+
+            const normalized = normalizeJobCleanupInput({
+              description: feedJob.description,
+              skills: feedJob.skills.length > 0 ? feedJob.skills : undefined,
+              remoteStatus: feedJob.remote_status ?? undefined,
+              applyUrl: feedJob.apply_url ?? undefined,
+              sourceUrl: feedJob.source_url,
+              postedDate: feedJob.posted_date,
+            });
+
+            if (normalized.isStale) return;
+
+            const pipelineResult = processJobPipeline(
+              {
+                title: feedJob.title,
+                company: feedJob.company,
+                location: feedJob.location,
+                description: normalized.description,
+                skills: normalized.skills,
+                remote_status: normalized.remoteStatus,
+                salary_range: feedJob.salary_range,
+                apply_url: normalized.applyUrl,
+                posted_date: feedJob.posted_date,
+                source_site: feedJob.source_site,
+                source_url: feedJob.source_url,
+                logo_url: feedJob.logo_url,
+              },
+              feedJob.source_url,
+            );
+
+            const storeRes = await this.db.storeJob({
+              title: feedJob.title,
+              company: feedJob.company,
+              location: feedJob.location,
+              description: normalized.description,
+              skills: normalized.skills,
+              remote_status: pipelineResult.remote_status_normalized,
+              salary_range: feedJob.salary_range,
+              apply_url: normalized.applyUrl,
+              posted_date: pipelineResult.posted_date_parsed ?? feedJob.posted_date,
+              source_site: feedJob.source_site,
+              source_url: feedJob.source_url,
+              logo_url: feedJob.logo_url,
+              crawled_at: new Date().toISOString(),
+            });
+
+            const storedJob = storeRes.data as
+              | Array<{ id: string }>
+              | { id: string }
+              | undefined;
+            const jobId =
+              storedJob && Array.isArray(storedJob)
+                ? storedJob[0]?.id
+                : (storedJob as { id: string } | undefined)?.id;
+
+            if (jobId && normalized.description.length > 20) {
+              const vector = await embeddingService.embed(normalized.description);
+              await this.db.storeJobVector(jobId, vector);
+              await this.matcher.bumpJobsIndexVersion();
+            }
+            seedJobs++;
+          });
+
+          totalJobs += seedJobs;
+          errors.push(...feedErrors);
+          logger.info(`[Discover] Feed seed done: ${seedJobs} jobs from ${seedUrl}`);
+          await log(`[Discover] Feed seed done: ${seedJobs} jobs from ${seedUrl}`);
+          continue;
+        }
+
+        // ── Firecrawl path: discover + scrape + LLM extract ──
         const links = await this.crawler.discoverUrls(seedUrl);
         if (links.length === 0) {
           logger.info(`[Discover] No new links from ${seedUrl}`);
@@ -77,6 +167,13 @@ class JobApplicationController {
 
         for (const { url: pageUrl, markdown } of pages) {
           try {
+            // ── Pipeline: junk filter (saves LLM API calls) ──
+            if (isJunkPage(pageUrl, markdown)) {
+              logger.info(`[Discover] Skipping ${pageUrl} — junk page detected`);
+              await log(`[Discover] Skip (junk): ${pageUrl}`);
+              continue;
+            }
+
             const job = await this.llm.extractJob(markdown);
 
             if (!job.title || !job.company) {
@@ -106,6 +203,25 @@ class JobApplicationController {
               continue;
             }
 
+            // ── Pipeline: normalize fields for Postgres enum + arrays ──
+            const pipelineResult = processJobPipeline(
+              {
+                title: job.title,
+                company: job.company,
+                location: job.location ?? null,
+                description: normalized.description,
+                skills: normalized.skills,
+                remote_status: normalized.remoteStatus,
+                salary_range: job.salary_range ?? null,
+                apply_url: normalized.applyUrl,
+                posted_date: job.posted_date ?? null,
+                source_site: job.source_site ?? seedUrl,
+                source_url: pageUrl,
+                logo_url: job.logo_url ?? null,
+              },
+              pageUrl,
+            );
+
             if ((!Array.isArray(job.skills) || job.skills.length === 0) && normalized.skills.length > 0) {
               logger.info(`[Discover] Inferred ${normalized.skills.length} skills from description for ${pageUrl}`);
             }
@@ -120,10 +236,10 @@ class JobApplicationController {
               location: job.location ?? null,
               description: normalized.description,
               skills: normalized.skills,
-              remote_status: normalized.remoteStatus,
+              remote_status: pipelineResult.remote_status_normalized,
               salary_range: job.salary_range ?? null,
               apply_url: normalized.applyUrl,
-              posted_date: job.posted_date ?? null,
+              posted_date: pipelineResult.posted_date_parsed ?? job.posted_date ?? null,
               source_site: job.source_site ?? seedUrl,
               source_url: pageUrl,
               logo_url: job.logo_url ?? null,

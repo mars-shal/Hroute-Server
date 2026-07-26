@@ -439,6 +439,7 @@ class Database {
         resume_file_type: profileData.resume_file_type ?? null,
         resume_version: profileData.resume_version ?? null,
         created_at: profileData.created_at ?? null,
+        resume_score: profileData.resume_score ?? null,
         status: 200,
       };
     } catch (e) {
@@ -676,7 +677,7 @@ class Database {
     try {
       const { data, error } = await this.supabase
         .from('jobs')
-        .select('id,description,skills,remote_status,apply_url,source_url,posted_date')
+        .select('id,title,description,skills,remote_status,apply_url,source_url,posted_date,experience_level')
         .order('crawled_at', { ascending: false })
         .limit(limit);
 

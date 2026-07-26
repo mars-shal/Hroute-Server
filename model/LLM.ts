@@ -1,6 +1,45 @@
 import Groq from 'groq-sdk';
 import { log, logger } from "../utils/logger.js";
+import { reformatResumeMarkdown } from '../utils/resumeReformat.js';
 import { RedisModel } from "./redis.js";
+
+/**
+ * Escape literal control characters (newlines, tabs, carriage returns)
+ * inside JSON string values so JSON.parse does not choke.
+ * Walks the string character-by-character, tracking whether we are
+ * inside a quoted JSON string.
+ */
+function sanitizeJsonString(raw: string): string {
+  let result = '';
+  let inString = false;
+  let escaped = false;
+  for (let i = 0; i < raw.length; i++) {
+    const ch = raw.charAt(i);
+    if (escaped) {
+      result += ch;
+      escaped = false;
+      continue;
+    }
+    if (ch === '\\' && inString) {
+      result += ch;
+      escaped = true;
+      continue;
+    }
+    if (ch === '"') {
+      inString = !inString;
+      result += ch;
+      continue;
+    }
+    if (inString) {
+      if (ch === '\n') { result += '\\n'; continue; }
+      if (ch === '\r') { result += '\\r'; continue; }
+      if (ch === '\t') { result += '\\t'; continue; }
+      if (ch < '\x1f') { result += `\\u${ch.charCodeAt(0).toString(16).padStart(4, '0')}`; continue; }
+    }
+    result += ch;
+  }
+  return result;
+}
 
 type Role = 'system' | 'user' | 'assistant';
 
@@ -326,7 +365,7 @@ class LLM {
       - issues: array of { category: "ats"|"content"|"format"|"completeness", severity: "high"|"medium"|"low", description: string }
       - suggestions: string[] (actionable improvement tips)`,
       (raw: string) => {
-        const cleaned = raw.replace(/```(?:json)?\s*/gi, "").trim();
+        const cleaned = sanitizeJsonString(raw.replace(/```(?:json)?\s*/gi, "").trim());
         return JSON.parse(cleaned) as {
           score: number;
           summary: string;
@@ -341,6 +380,75 @@ class LLM {
     return result;
   }
 
+  private async rewriteSections(
+    resumeText: string,
+    sections: string[],
+    instruction: string,
+  ): Promise<string> {
+    logger.info(`[LLM] rewriteSections (text=${resumeText.length} chars, sections=${sections.length})`);
+    await log(`[LLM] rewriteSections starting (${sections.join(", ")})`);
+
+    const targetSections = new Set(
+      sections
+        .map((section) => section.trim().toLowerCase())
+        .filter((section) => section.length > 0),
+    );
+    const matches = Array.from(resumeText.matchAll(/^##\s+(.+)$/gm));
+
+    if (matches.length === 0 || targetSections.size === 0) {
+      logger.info(`[LLM] rewriteSections done — rewritten=0`);
+      await log(`[LLM] rewriteSections result: rewritten=0`);
+      return resumeText;
+    }
+
+    const firstMatch = matches[0];
+    const firstHeaderIndex = firstMatch?.index ?? 0;
+    const reassembled: string[] = [resumeText.slice(0, firstHeaderIndex)];
+    let rewrittenCount = 0;
+
+    for (let index = 0; index < matches.length; index++) {
+      const match = matches[index];
+      if (!match || match.index === undefined) continue;
+
+      const sectionName = match[1]?.trim() ?? "";
+      const header = match[0];
+      const contentStart = match.index + header.length;
+      const nextHeaderIndex = matches[index + 1]?.index ?? resumeText.length;
+      const sectionContent = resumeText.slice(contentStart, nextHeaderIndex);
+      let content = sectionContent;
+
+      if (targetSections.has(sectionName.toLowerCase())) {
+        const result = await this.structured(
+          `Rewrite this resume section in Google XYZ format:
+"Accomplished X by doing Y resulting in Z"
+
+Section name: ${sectionName}
+Current content:
+${sectionContent}
+
+User instruction: ${instruction}
+
+Return JSON with:
+- content: string (rewritten section in markdown)`,
+          (raw: string) => {
+            const cleaned = sanitizeJsonString(raw.replace(/```(?:json)?\s*/gi, "").trim());
+            return JSON.parse(cleaned) as { content: string };
+          },
+          { temperature: 0.1, model: 'llama-3.1-8b-instant', max_tokens: 2048 },
+        );
+        content = result.content;
+        rewrittenCount += 1;
+      }
+
+      reassembled.push(`${header}${content}`);
+    }
+
+    const rewrittenResume = reassembled.join("");
+    logger.info(`[LLM] rewriteSections done — rewritten=${rewrittenCount}`);
+    await log(`[LLM] rewriteSections result: rewritten=${rewrittenCount}`);
+    return rewrittenResume;
+  }
+
   async improveResume(
     resumeText: string,
     instruction: string,
@@ -353,7 +461,7 @@ class LLM {
   }> {
     logger.info(`[LLM] improveResume (text=${resumeText.length} chars)`);
     await log(`[LLM] improveResume starting`);
-    const result = await this.structured(
+    const stage1 = await this.structured(
       `You are a professional resume writer. Rewrite the resume below in Google XYZ format:
       "Accomplished X by doing Y resulting in Z"
 
@@ -378,7 +486,7 @@ class LLM {
       - issues: array of { category: string, severity: string, description: string }
       - suggestions: string[]`,
       (raw: string) => {
-        const cleaned = raw.replace(/```(?:json)?\s*/gi, "").trim();
+        const cleaned = sanitizeJsonString(raw.replace(/```(?:json)?\s*/gi, "").trim());
         return JSON.parse(cleaned) as {
           resume_text: string;
           changes: string[];
@@ -389,8 +497,135 @@ class LLM {
       },
       { temperature: 0.3, max_tokens: 4096 },
     );
-    logger.info(`[LLM] improveResume done — score=${result.score} changes=${result.changes.length}`);
-    await log(`[LLM] improveResume result: score=${result.score} changes=${result.changes.join(", ").slice(0, 200)}`);
+
+    let validation: {
+      xyz_compliant: boolean;
+      section_headers_valid: boolean;
+      one_page: boolean;
+      issues: Array<{ category: string; severity: string; description: string }>;
+      sections_to_rewrite: string[];
+    };
+    try {
+      validation = await this.validateResume(stage1.resume_text);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      logger.warn(`[LLM] improveResume validation failed (non-fatal): ${message}`);
+      validation = {
+        xyz_compliant: false,
+        section_headers_valid: false,
+        one_page: false,
+        issues: [],
+        sections_to_rewrite: [],
+      };
+    }
+
+    const { resume_text, fixes_applied, issues_remaining } = reformatResumeMarkdown(stage1.resume_text);
+
+    let finalText = resume_text;
+    if (validation.sections_to_rewrite.length > 0 && !validation.xyz_compliant) {
+      try {
+        finalText = await this.rewriteSections(resume_text, validation.sections_to_rewrite, instruction);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        logger.warn(`[LLM] improveResume rewriteSections failed (non-fatal): ${message}`);
+        finalText = resume_text;
+      }
+    }
+
+    let finalScore: {
+      score: number;
+      summary: string;
+      issues: Array<{ category: string; severity: string; description: string }>;
+      suggestions: string[];
+    };
+    try {
+      finalScore = await this.resumeScore(finalText);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      logger.warn(`[LLM] improveResume finalScore failed (non-fatal): ${message}`);
+      finalScore = { score: stage1.score, summary: '', issues: [], suggestions: [] };
+    }
+
+    const changesCount = stage1.changes.length + fixes_applied.length;
+    logger.info(`[LLM] improveResume done — score=${finalScore.score} changes=${changesCount}`);
+    await log(`[LLM] improveResume result: score=${finalScore.score} changes=${changesCount}`);
+
+    return {
+      resume_text: finalText,
+      changes: [...stage1.changes, ...fixes_applied],
+      score: finalScore.score,
+      issues: [
+        ...finalScore.issues,
+        ...issues_remaining.map((issue) => ({
+          category: 'format',
+          severity: 'medium',
+          description: issue,
+        })),
+      ],
+      suggestions: finalScore.suggestions,
+    };
+  }
+
+  async validateResume(
+    resumeText: string,
+  ): Promise<{
+    xyz_compliant: boolean;
+    section_headers_valid: boolean;
+    one_page: boolean;
+    issues: Array<{ category: string; severity: string; description: string }>;
+    sections_to_rewrite: string[];
+  }> {
+    logger.info(`[LLM] validateResume (text=${resumeText.length} chars)`);
+    await log(`[LLM] validateResume starting`);
+
+    if (await this.isRateLimited('llama-3.3-70b-versatile')) {
+      logger.warn('[LLM] validateResume skipped — rate limited');
+      await log('[LLM] validateResume SKIPPED (rate limited)');
+      return {
+        xyz_compliant: false,
+        section_headers_valid: false,
+        one_page: false,
+        issues: [
+          {
+            category: 'rate_limit',
+            severity: 'high',
+            description: 'Resume validation could not be completed because the LLM is rate limited.',
+          },
+        ],
+        sections_to_rewrite: [],
+      };
+    }
+
+    const raw = await this.reason(
+      `Analyze this resume for Google XYZ format compliance and structural rules.
+
+Resume:
+${resumeText}
+
+Check:
+1. XYZ FORMAT: Is every bullet point in "Accomplished X by doing Y resulting in Z" format?
+2. SECTION HEADERS: Does it have required sections (Experience, Education, Skills)?
+3. ONE PAGE: Is content concise enough for one page (~3000 chars)?
+
+Return JSON with:
+- xyz_compliant: boolean
+- section_headers_valid: boolean
+- one_page: boolean
+- issues: array of { category, severity, description }
+- sections_to_rewrite: string[] (list of section names that need rewriting)`,
+      { temperature: 0.2, max_tokens: 2048 },
+    );
+    const cleaned = sanitizeJsonString(raw.replace(/```(?:json)?\s*/gi, "").trim());
+    const result = JSON.parse(cleaned) as {
+      xyz_compliant: boolean;
+      section_headers_valid: boolean;
+      one_page: boolean;
+      issues: Array<{ category: string; severity: string; description: string }>;
+      sections_to_rewrite: string[];
+    };
+
+    logger.info(`[LLM] validateResume done — issues=${result.issues.length} rewrite_sections=${result.sections_to_rewrite.length}`);
+    await log(`[LLM] validateResume result: xyz=${result.xyz_compliant} headers=${result.section_headers_valid} one_page=${result.one_page} issues=${result.issues.length}`);
     return result;
   }
 }

@@ -4,15 +4,20 @@ import type { DatabaseLike } from "../model/database.js";
 import { JobMatcher } from "./jobMatcher.js";
 import type { JobMatcherService } from "./jobMatcher.js";
 import { normalizeJobCleanupInput } from "../utils/jobCleanup.js";
+import { normalizeRemoteStatusToEnum, normalizeLocationToArray } from "../utils/jobPipeline.js";
+import { classifyExperienceLevel } from "../utils/jobFeeds.js";
 
 type CleanupJobRow = {
   readonly id: string;
+  readonly title: string;
   readonly description: string | null;
   readonly skills: readonly string[] | null;
   readonly remote_status: string | null;
   readonly apply_url: string | null;
   readonly source_url: string;
   readonly posted_date: string | null;
+  readonly location: string | null;
+  readonly experience_level: string | null;
 };
 
 type CleanupJobsOptions = {
@@ -24,6 +29,9 @@ type CleanupJobsOptions = {
    * replacing stored skills. Use this once after fixing inferSkillsFromText
    * to purge false positives from old substring matching. */
   readonly force_reinfer_skills?: boolean;
+  /** Backfill experience_level for jobs where it's 'unspecified' or null.
+   * Classifies title + description as entry/mid/senior/unspecified. */
+  readonly backfill_experience_level?: boolean;
 };
 
 type CleanupJobsResult = {
@@ -32,6 +40,7 @@ type CleanupJobsResult = {
   readonly updated: number;
   readonly pruned: number;
   readonly stale_found: number;
+  readonly experience_backfilled: number;
   readonly dry_run: boolean;
   readonly errors: readonly string[];
   readonly message: string;
@@ -52,6 +61,7 @@ class JobMaintenanceController {
     const pruneOld = options.prune_old ?? false;
     const recomputeEmbeddings = options.recompute_embeddings ?? true;
     const reinferSkills = options.force_reinfer_skills ?? false;
+    const backfillExperience = options.backfill_experience_level ?? false;
     const errors: string[] = [];
 
     const listResult = await this.db.listJobsForCleanup(limit);
@@ -62,6 +72,7 @@ class JobMaintenanceController {
         updated: 0,
         pruned: 0,
         stale_found: 0,
+        experience_backfilled: 0,
         dry_run: dryRun,
         errors: [String(listResult.response ?? listResult.error ?? "Failed to list jobs")],
         message: "Job cleanup failed before scanning rows.",
@@ -81,6 +92,7 @@ class JobMaintenanceController {
     let updated = 0;
     let pruned = 0;
     let staleFound = 0;
+    let experienceBackfilled = 0;
 
     for (const row of rows) {
       const normalized = normalizeJobCleanupInput({
@@ -115,13 +127,24 @@ class JobMaintenanceController {
       const currentSkills = Array.isArray(row.skills) ? row.skills : [];
       const nextSkills = [...normalized.skills];
       const currentApplyUrl = row.apply_url?.trim() ?? "";
+      const normalizedRemote = normalizeRemoteStatusToEnum(row.remote_status ?? "unknown");
       const shouldUpdateDescription = normalized.description !== (row.description ?? "");
-      const shouldUpdateRemoteStatus = normalized.remoteStatus !== (row.remote_status ?? "unknown");
+      const shouldUpdateRemoteStatus = normalized.remoteStatus !== normalizedRemote;
       const shouldUpdateApplyUrl = normalized.applyUrl !== currentApplyUrl;
       const shouldUpdateSkills =
         currentSkills.length !== nextSkills.length || currentSkills.some((skill, index) => skill !== nextSkills[index]);
 
-      if (!shouldUpdateDescription && !shouldUpdateRemoteStatus && !shouldUpdateApplyUrl && !shouldUpdateSkills) {
+      let nextExperienceLevel = row.experience_level ?? "unspecified";
+      let shouldUpdateExperience = false;
+      if (backfillExperience && (nextExperienceLevel === "unspecified" || nextExperienceLevel === null)) {
+        const classified = classifyExperienceLevel(row.title, normalized.description);
+        if (classified !== "unspecified") {
+          nextExperienceLevel = classified;
+          shouldUpdateExperience = true;
+        }
+      }
+
+      if (!shouldUpdateDescription && !shouldUpdateRemoteStatus && !shouldUpdateApplyUrl && !shouldUpdateSkills && !shouldUpdateExperience) {
         continue;
       }
 
@@ -131,13 +154,16 @@ class JobMaintenanceController {
           patch.description = normalized.description;
         }
         if (shouldUpdateRemoteStatus) {
-          patch.remote_status = normalized.remoteStatus;
+          patch.remote_status = normalizeRemoteStatusToEnum(normalized.remoteStatus);
         }
         if (shouldUpdateApplyUrl) {
           patch.apply_url = normalized.applyUrl;
         }
         if (shouldUpdateSkills) {
           patch.skills = nextSkills;
+        }
+        if (shouldUpdateExperience) {
+          patch.experience_level = nextExperienceLevel;
         }
 
         const updateResult = await this.db.updateJobById(row.id, patch);
@@ -147,6 +173,7 @@ class JobMaintenanceController {
         }
 
         updated += 1;
+        if (shouldUpdateExperience) experienceBackfilled += 1;
 
         if (embeddingService && shouldUpdateDescription && normalized.description.length > 20) {
           const vector = await embeddingService.embed(normalized.description);
@@ -157,6 +184,7 @@ class JobMaintenanceController {
         }
       } else {
         updated += 1;
+        if (shouldUpdateExperience) experienceBackfilled += 1;
       }
     }
 
@@ -165,9 +193,10 @@ class JobMaintenanceController {
     }
 
     const reinferLabel = reinferSkills ? " (skills re-inferred)" : "";
+    const backfillLabel = backfillExperience ? ` (${experienceBackfilled} experience classified)` : "";
     const message = pruneOld
-      ? `Cleanup scanned ${rows.length} jobs, updated ${updated}, pruned ${pruned}, found ${staleFound} stale.${reinferLabel}`
-      : `Cleanup scanned ${rows.length} jobs, updated ${updated}, found ${staleFound} stale.${reinferLabel}`;
+      ? `Cleanup scanned ${rows.length} jobs, updated ${updated}, pruned ${pruned}, found ${staleFound} stale.${reinferLabel}${backfillLabel}`
+      : `Cleanup scanned ${rows.length} jobs, updated ${updated}, found ${staleFound} stale.${reinferLabel}${backfillLabel}`;
 
     logger.info(`[JobMaintenance] ${message}`);
     await log(`[JobMaintenance] ${message}`);
@@ -178,6 +207,7 @@ class JobMaintenanceController {
       updated,
       pruned,
       stale_found: staleFound,
+      experience_backfilled: experienceBackfilled,
       dry_run: dryRun,
       errors,
       message,
