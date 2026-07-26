@@ -29,7 +29,7 @@ interface UploadResult {
 
 type ImproveResult = {
   status: number;
-  resume_text?: string;
+  reply?: string;
   score?: number;
   changes?: string[];
   issues?: ResumeIssue[];
@@ -220,9 +220,11 @@ class ResumeController {
       logger.info(`[Resume] improve complete — score=${result.score} changes=${result.changes.length}`);
       await log(`[Resume] improve: score=${result.score} changes=${result.changes.join(", ").slice(0, 100)}`);
 
+      const reply = this.buildImproveReply(result.changes, result.issues, result.suggestions, result.score);
+
       return {
         status: 200,
-        resume_text: result.resume_text,
+        reply,
         score: result.score,
         changes: result.changes,
         issues: result.issues,
@@ -233,6 +235,36 @@ class ResumeController {
       logger.error(`[Resume] improve error: ${msg}`);
       return { status: 500, error: msg };
     }
+  }
+
+  private buildImproveReply(
+    changes: string[],
+    issues: ResumeIssue[],
+    suggestions: string[],
+    score: number,
+  ): string {
+    const lines: string[] = [];
+
+    lines.push(`Your resume has been updated. New ATS score: **${score}**/100.\n`);
+
+    if (changes.length > 0) {
+      lines.push('**Changes made:**');
+      for (const c of changes) lines.push(`- ${c}`);
+      lines.push('');
+    }
+
+    if (issues.length > 0) {
+      lines.push('**Remaining issues:**');
+      for (const i of issues) lines.push(`- [${i.severity}] ${i.description}`);
+      lines.push('');
+    }
+
+    if (suggestions.length > 0) {
+      lines.push('**Suggestions:**');
+      for (const s of suggestions) lines.push(`- ${s}`);
+    }
+
+    return lines.join('\n');
   }
 
   async exportPdf(token: string): Promise<ExportResult> {
