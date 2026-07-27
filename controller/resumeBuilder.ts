@@ -443,6 +443,62 @@ Return JSON:
         });
       }
 
+      // Normalize experience — LLM may return bullets as string or missing
+      if (Array.isArray(updatedSession.experience)) {
+        updatedSession.experience = updatedSession.experience.map((e: unknown) => {
+          if (typeof e !== "object" || e === null) return { company: String(e ?? "Unknown"), role: "", start_date: "", end_date: "", bullets: [] };
+          const exp = e as Record<string, unknown>;
+          let bullets: string[] = [];
+          if (Array.isArray(exp.bullets)) {
+            bullets = exp.bullets.map(b => typeof b === "string" ? b : String(b));
+          } else if (typeof exp.bullets === "string") {
+            bullets = exp.bullets.split(/[,;]\s*/).map(s => s.trim()).filter(Boolean);
+          } else if (exp.bullets === null || exp.bullets === undefined) {
+            bullets = [];
+          }
+          return {
+            company: String(exp.company ?? "Unknown"),
+            role: String(exp.role ?? ""),
+            start_date: String(exp.start_date ?? ""),
+            end_date: String(exp.end_date ?? ""),
+            bullets,
+          };
+        });
+      }
+
+      // Normalize projects — description and technologies may be strings
+      if (Array.isArray(updatedSession.projects)) {
+        updatedSession.projects = updatedSession.projects.map((p: unknown) => {
+          if (typeof p !== "object" || p === null) return { name: String(p ?? "Project"), description: [], technologies: [] };
+          const proj = p as Record<string, unknown>;
+          const normalizeArr = (v: unknown): string[] => {
+            if (Array.isArray(v)) return v.map(i => String(i));
+            if (typeof v === "string") return [v];
+            return [];
+          };
+          return {
+            name: String(proj.name ?? "Project"),
+            description: normalizeArr(proj.description),
+            technologies: normalizeArr(proj.technologies),
+          };
+        });
+      }
+
+      // Normalize education
+      if (Array.isArray(updatedSession.education)) {
+        updatedSession.education = updatedSession.education.map((e: unknown) => {
+          if (typeof e !== "object" || e === null) return { institution: String(e ?? ""), degree: "", field: "", start_date: "", end_date: "" };
+          const edu = e as Record<string, unknown>;
+          return {
+            institution: String(edu.institution ?? ""),
+            degree: String(edu.degree ?? ""),
+            field: String(edu.field ?? ""),
+            start_date: String(edu.start_date ?? ""),
+            end_date: String(edu.end_date ?? ""),
+          };
+        });
+      }
+
       return updatedSession;
     } catch (e) {
       logger.warn(`[ResumeBuilder] Failed to parse LLM response: ${e}`);
