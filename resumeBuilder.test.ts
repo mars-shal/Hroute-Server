@@ -1,13 +1,22 @@
 import { describe, it, expect, beforeAll, afterAll } from "bun:test";
 import { ResumeBuilderController } from "./controller/resumeBuilder.js";
+import type { DatabaseLike } from "./model/database.js";
 
 const TIMEOUT = 30_000;
+
+const mockDb = {
+  getUser: async () => ({ status: 200, resume_text: "", display_name: "", email: "", location: "", skills: [], experience: null }),
+  uploadFile: async () => ({ status: 200 }),
+  getGeneratedResumeUrl: async () => ({ status: 200, url: undefined }),
+  updateUser: async () => ({ status: 200 }),
+  authenticateToken: async () => ({ status: 200, userId: "test-user-1" }),
+} as unknown as DatabaseLike;
 
 let controller: ResumeBuilderController;
 let sessionId: string;
 
 beforeAll(async () => {
-  controller = new ResumeBuilderController();
+  controller = new ResumeBuilderController(mockDb);
   const session = await controller.createSession("test-user-1");
   sessionId = session.id;
 }, TIMEOUT);

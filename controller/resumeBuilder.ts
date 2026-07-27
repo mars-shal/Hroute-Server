@@ -12,6 +12,8 @@ import { RedisModel } from '../model/redis.js';
 import { LLM } from '../model/LLM.js';
 import { scoreResume, type ATSScoreResult } from '../utils/atsScorer.js';
 import { log, logger } from '../utils/logger.js';
+import type { DatabaseLike } from '../model/database.js';
+import { htmlToPdf } from '../utils/pdfGenerator.js';
 
 // ── Types ──────────────────────────────────────────────────────
 
@@ -112,36 +114,45 @@ const OPTIONAL_FIELDS = [
 class ResumeBuilderController {
   private redis: RedisModel;
   private llm: LLM;
+  private db: DatabaseLike;
 
-  constructor() {
+  constructor(db: DatabaseLike) {
     this.redis = new RedisModel();
     this.llm = new LLM();
+    this.db = db;
   }
 
   /**
    * Create a new resume session
    */
-  async createSession(userId: string, initialData?: Partial<ResumeSession>): Promise<ResumeSession> {
+  async createSession(userId: string, token?: string, initialData?: Partial<ResumeSession>): Promise<ResumeSession> {
     const sessionId = this.generateSessionId();
     const now = new Date().toISOString();
+
+    let preFilled: Partial<ResumeSession> = {};
+    if (token) {
+      preFilled = await this.fetchExistingProfile(token);
+    }
+
+    const merged = { ...preFilled, ...initialData };
 
     const session: ResumeSession = {
       id: sessionId,
       userId,
-      full_name: initialData?.full_name ?? '',
-      email: initialData?.email ?? '',
-      phone: initialData?.phone ?? '',
-      location: initialData?.location ?? '',
-      linkedin_url: initialData?.linkedin_url,
-      github_url: initialData?.github_url,
-      portfolio_url: initialData?.portfolio_url,
-      summary: initialData?.summary ?? '',
-      skills: initialData?.skills ?? [],
-      experience: initialData?.experience ?? [],
-      projects: initialData?.projects ?? [],
-      education: initialData?.education ?? [],
-      certifications: initialData?.certifications ?? [],
-      chat_history: initialData?.chat_history ?? [],
+      full_name: merged.full_name ?? '',
+      email: merged.email ?? '',
+      phone: merged.phone ?? '',
+      location: merged.location ?? '',
+      linkedin_url: merged.linkedin_url,
+      github_url: merged.github_url,
+      portfolio_url: merged.portfolio_url,
+      summary: merged.summary ?? '',
+      skills: merged.skills ?? [],
+      experience: merged.experience ?? [],
+      projects: merged.projects ?? [],
+      education: merged.education ?? [],
+      certifications: merged.certifications ?? [],
+      chat_history: merged.chat_history ?? [],
       ats_score: null,
       resume_text: '',
       created_at: now,
@@ -307,10 +318,10 @@ class ResumeBuilderController {
   /**
    * Generate final resume text from session
    */
-  async generateResume(sessionId: string): Promise<{
+  async generateResume(sessionId: string, token?: string): Promise<{
     resume_text: string;
     ats_score: ATSScoreResult;
-    html?: string;
+    pdf_url?: string;
   }> {
     const session = await this.getSession(sessionId);
     if (!session) {
@@ -320,15 +331,20 @@ class ResumeBuilderController {
     const resumeText = this.generateResumeText(session);
     const atsScore = scoreResume(resumeText);
 
-    // Update session with final resume
     await this.updateSession(sessionId, {
       resume_text: resumeText,
       ats_score: atsScore,
     });
 
+    let pdfUrl: string | undefined;
+    if (token) {
+      pdfUrl = await this.uploadPdfToStorage(token, resumeText, session.full_name || 'Resume');
+    }
+
     return {
       resume_text: resumeText,
       ats_score: atsScore,
+      pdf_url: pdfUrl,
     };
   }
 
@@ -635,6 +651,94 @@ Return JSON:
       logger.info(`[ResumeBuilder] Updating profile for user ${userId}`);
     } catch (e) {
       logger.error(`[ResumeBuilder] Failed to update profile: ${e}`);
+    }
+  }
+
+  private async fetchExistingProfile(token: string): Promise<Partial<ResumeSession>> {
+    try {
+      const profile = await this.db.getUser(token);
+      if (profile.status !== 200) return {};
+
+      const resumeText = String(profile.resume_text ?? '');
+      if (!resumeText || resumeText.length < 20) return {};
+
+      logger.info(`[ResumeBuilder] Pre-filling from existing resume (${resumeText.length} chars)`);
+      await log(`[ResumeBuilder] Pre-filling session from existing resume`);
+
+      const extracted = await this.llm.extractProfile(resumeText);
+
+      const location = String(extracted.location ?? profile.location ?? '');
+
+      let skills: SkillCategory[] = [];
+      const rawSkills = extracted.skills;
+      if (Array.isArray(rawSkills)) {
+        const strings = rawSkills.filter((s: unknown): s is string => typeof s === "string" && s.length > 0);
+        if (strings.length > 0) {
+          skills = [{ name: "General", skills: strings }];
+        }
+      }
+
+      const experience: ExperienceEntry[] = [];
+      const profileExp = profile.experience;
+      if (typeof profileExp === "string" && profileExp.length > 0) {
+        experience.push({
+          company: '',
+          role: String(extracted.role ?? ''),
+          start_date: '',
+          end_date: 'Present',
+          bullets: profileExp.split(/\n/).filter((l: string) => l.trim().length > 0),
+        });
+      }
+
+      return {
+        full_name: String(profile.display_name ?? ''),
+        email: String(profile.email ?? ''),
+        location,
+        summary: `Experienced ${String(extracted.role ?? 'professional')} based in ${location || 'unknown location'}.`,
+        skills,
+        experience,
+      };
+    } catch (e) {
+      logger.warn(`[ResumeBuilder] Failed to pre-fill from profile: ${e}`);
+      return {};
+    }
+  }
+
+  private async uploadPdfToStorage(token: string, resumeText: string, name: string): Promise<string | undefined> {
+    try {
+      const html = `<html><body><div style="max-width:800px;margin:0 auto;font-family:Arial,sans-serif;line-height:1.6;">${resumeText.split('\n').map(line => {
+        if (line.startsWith('# ')) return `<h1 style="margin:0 0 8px;">${line.slice(2)}</h1>`;
+        if (line.startsWith('## ')) return `<h2 style="margin:16px 0 8px;font-size:14px;text-transform:uppercase;border-bottom:1px solid #ccc;padding-bottom:4px;">${line.slice(3)}</h2>`;
+        if (line.startsWith('- ')) return `<li style="margin:2px 0;">${line.slice(2)}</li>`;
+        if (line.startsWith('**') && line.endsWith('**')) return `<p style="margin:4px 0;"><strong>${line.slice(2, -2)}</strong></p>`;
+        if (line.trim() === '---') return `<hr style="margin:12px 0;border:none;border-top:1px solid #ddd;">`;
+        if (line.trim() === '') return '<br>';
+        return `<p style="margin:2px 0;">${line}</p>`;
+      }).join('\n')}</div></body></html>`;
+      const pdfBuf = await htmlToPdf(html);
+      const pdfBase64 = pdfBuf.toString('base64');
+
+      const uploadResult = await this.db.uploadFile(token, {
+        fileData: pdfBase64,
+        filePath: 'generated',
+        fileName: 'resume.pdf',
+        contentType: 'application/pdf',
+      });
+
+      if (uploadResult.status !== 200) {
+        logger.error(`[ResumeBuilder] Storage upload failed: ${uploadResult.response ?? 'unknown'}`);
+        return undefined;
+      }
+
+      const signedUrlResult = await this.db.getGeneratedResumeUrl(token);
+      const url = signedUrlResult.status === 200 && signedUrlResult.url ? signedUrlResult.url : undefined;
+
+      logger.info(`[ResumeBuilder] PDF uploaded to storage (${pdfBuf.length} bytes)`);
+      await log(`[ResumeBuilder] PDF uploaded: ${pdfBuf.length} bytes`);
+      return url;
+    } catch (e) {
+      logger.warn(`[ResumeBuilder] PDF upload failed (non-fatal): ${e}`);
+      return undefined;
     }
   }
 }

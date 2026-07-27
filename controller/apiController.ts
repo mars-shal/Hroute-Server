@@ -25,7 +25,7 @@ export function createApiRouter(db: DatabaseLike, deps: ApiControllerDeps = {}):
   const jobs = deps.jobs ?? new JobApplicationController(db);
   const jobMaintenance = deps.jobMaintenance ?? new JobMaintenanceController(db);
   const resume = deps.resume ?? new ResumeController(db);
-  const resumeBuilder = deps.resumeBuilder ?? new ResumeBuilderController();
+  const resumeBuilder = deps.resumeBuilder ?? new ResumeBuilderController(db);
 
   // ── Auth routes ──────────────────────────────────────────────
 
@@ -414,7 +414,7 @@ export function createApiRouter(db: DatabaseLike, deps: ApiControllerDeps = {}):
       const userId = authResult.userId;
       const initialData = req.body as Record<string, unknown> | undefined;
 
-      const session = await resumeBuilder.createSession(userId, initialData);
+      const session = await resumeBuilder.createSession(userId, token, initialData);
       logger.info(`[API] POST /resume-builder/session → 200 (session=${session.id})`);
       res.status(200).json(session);
     } catch (e) {
@@ -503,7 +503,7 @@ export function createApiRouter(db: DatabaseLike, deps: ApiControllerDeps = {}):
       }
 
       const { sessionId } = req.params;
-      const result = await resumeBuilder.generateResume(sessionId);
+      const result = await resumeBuilder.generateResume(sessionId, token);
       
       logger.info(`[API] POST /resume-builder/generate/${sessionId} → 200 (score=${result.ats_score.score})`);
       res.status(200).json(result);

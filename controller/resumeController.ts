@@ -3,7 +3,7 @@ import type { DatabaseLike } from '../model/database.js';
 import { EmbeddingService } from '../utils/embedding.js';
 import { LLM } from '../model/LLM.js';
 import { log, logger } from '../utils/logger.js';
-import markdownpdf from 'markdown-pdf';
+import { htmlToPdf } from '../utils/pdfGenerator.js';
 
 const MAX_RESUME_FILE_BYTES = 2 * 1024 * 1024;
 const MAX_RESUME_FILE_BASE64_CHARS = Math.ceil(MAX_RESUME_FILE_BYTES / 3) * 4;
@@ -248,9 +248,18 @@ class ResumeController {
       }
 
       const md = `# ${profile.display_name ?? 'Resume'}\n\n${resumeText}`;
+      const html = `<html><body><div style="max-width:800px;margin:0 auto;font-family:Arial,sans-serif;line-height:1.6;">${md.split('\n').map(line => {
+        if (line.startsWith('# ')) return `<h1 style="margin:0 0 8px;">${line.slice(2)}</h1>`;
+        if (line.startsWith('## ')) return `<h2 style="margin:16px 0 8px;font-size:14px;text-transform:uppercase;border-bottom:1px solid #ccc;padding-bottom:4px;">${line.slice(3)}</h2>`;
+        if (line.startsWith('- ')) return `<li style="margin:2px 0;">${line.slice(2)}</li>`;
+        if (line.startsWith('**') && line.endsWith('**')) return `<p style="margin:4px 0;"><strong>${line.slice(2, -2)}</strong></p>`;
+        if (line.trim() === '---') return `<hr style="margin:12px 0;border:none;border-top:1px solid #ddd;">`;
+        if (line.trim() === '') return '<br>';
+        return `<p style="margin:2px 0;">${line}</p>`;
+      }).join('\n')}</div></body></html>`;
 
-      logger.info(`[Resume] exportPdf: converting ${md.length} chars to PDF`);
-      const pdfBuf = await mdToPdf(md);
+      logger.info(`[Resume] exportPdf: converting ${html.length} chars HTML to PDF`);
+      const pdfBuf = await htmlToPdf(html);
 
       const pdfBase64 = pdfBuf.toString('base64');
       const uploadResult = await this.db.uploadFile(token, {
