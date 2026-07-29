@@ -4,6 +4,7 @@ import { EmbeddingService } from '../utils/embedding.js';
 import { LLM } from '../model/LLM.js';
 import { log, logger } from '../utils/logger.js';
 import { htmlToPdf } from '../utils/pdfGenerator.js';
+import { scoreResume } from '../utils/atsScorer.js';
 
 const MAX_RESUME_FILE_BYTES = 2 * 1024 * 1024;
 const MAX_RESUME_FILE_BASE64_CHARS = Math.ceil(MAX_RESUME_FILE_BYTES / 3) * 4;
@@ -144,12 +145,27 @@ class ResumeController {
 
       let assessment: ResumeAssessment | null = null;
       try {
-        assessment = await this.llm.resumeScore(resumeText);
-        if (assessment) {
-          profilePayload.resume_score = assessment.score;
-          await this.db.updateUser(token, { resume_score: assessment.score }).catch(() => {});
-        }
-        logger.info(`[Resume] Assessment complete — score=${assessment?.score ?? '?'}`);
+        const llmResult = await this.llm.resumeScore(resumeText);
+        const atsResult = scoreResume(resumeText);
+
+        const W_LLM = 0.4;
+        const W_ATS = 0.6;
+        const atsNormalized = atsResult.score / 100;
+        const combinedScore = Math.round((W_LLM * llmResult.score + W_ATS * atsNormalized) * 100) / 100;
+
+        assessment = {
+          score: combinedScore,
+          summary: llmResult.summary,
+          issues: [
+            ...llmResult.issues.map(i => ({ category: i.category, severity: i.severity, description: i.description })),
+            ...atsResult.issues.map(i => ({ category: i.category, severity: i.severity, description: i.description })),
+          ],
+          suggestions: [...llmResult.suggestions, ...atsResult.suggestions],
+        };
+
+        profilePayload.resume_score = combinedScore;
+        await this.db.updateUser(token, { resume_score: combinedScore }).catch(() => {});
+        logger.info(`[Resume] Assessment complete — llm=${llmResult.score} ats=${atsResult.score} combined=${combinedScore}`);
       } catch (assessErr) {
         logger.warn(`[Resume] Assessment LLM call failed (non-fatal): ${assessErr}`);
       }
