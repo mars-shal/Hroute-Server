@@ -677,7 +677,7 @@ class Database {
     try {
       const { data, error } = await this.supabase
         .from('jobs')
-        .select('id,title,description,skills,remote_status,apply_url,source_url,posted_date,experience_level')
+        .select('id,title,description,skills,remote_status,apply_url,source_url,posted_date,company,source_site,experience_level')
         .order('crawled_at', { ascending: false })
         .limit(limit);
 

@@ -273,6 +273,7 @@ class LLM {
         - apply_url: direct application URL if found (string or null)
         - posted_date: original posted date string as-is from the text, or relative like "2 days ago" (string or null)
         - source_site: domain name of the source (string or null)
+        - experience_level: "entry" for junior/graduate/intern/NYSC, "mid" for mid-level (no strong senior/junior signal), "senior" for senior/sr/staff/lead/principal/manager/director/head of, "unspecified" if unclear (string)
       Use null for truly missing fields. Do NOT include markdown formatting in description.\n\n${truncated}`,
       (raw: string) => {
         const cleaned = raw.replace(/```(?:json)?\s*/gi, "").trim();

@@ -3,6 +3,7 @@ import type { DatabaseLike } from "../model/database.js";
 import { RedisModel } from "../model/redis.js";
 import type { RedisLike } from "../model/redis.js";
 import { logger } from "../utils/logger.js";
+import { computeSeniorityScore } from "../utils/jobFeeds.js";
 
 const MATCH_CACHE_TTL_SECONDS = 600;
 const DEFAULT_LIMIT = 20;
@@ -205,6 +206,7 @@ class JobMatcher {
     const workStyleScore = this.workStyleScore(job, profile, filters);
     const recencyScore = this.recencyScore(job.crawled_at ?? job.posted_date);
     const salaryScore = this.salaryScore(job.salary_range, filters.salary_target ?? profile.salary_target);
+    const seniorityScore = this.seniorityScore(job, profile);
     const missingRequiredPenalty = Math.min(0.4, missingSkills.length * 0.05);
     const rawScore =
       similarity * 0.8 +
@@ -212,7 +214,8 @@ class JobMatcher {
       locationScore * 0.06 +
       workStyleScore * 0.05 +
       recencyScore * 0.04 +
-      salaryScore * 0.02 -
+      salaryScore * 0.02 +
+      seniorityScore * 0.14 -
       missingRequiredPenalty;
 
     return {
@@ -222,7 +225,7 @@ class JobMatcher {
       similarity,
       matched_skills: matchedSkills,
       missing_skills: missingSkills,
-      rank_reasons: this.rankReasons(matchedSkills, locationScore, workStyleScore, recencyScore, salaryScore),
+      rank_reasons: this.rankReasons(matchedSkills, locationScore, workStyleScore, recencyScore, salaryScore, seniorityScore),
     };
   }
 
@@ -260,13 +263,30 @@ class JobMatcher {
     return jobText && targetText && jobText.includes(targetText) ? 1 : 0.5;
   }
 
-  private rankReasons(skills: string[], location: number, workStyle: number, recency: number, salary: number): string[] {
+  private seniorityScore(job: Record<string, unknown>, profile: Record<string, unknown>): number {
+    // Prefer stored experience_level if available
+    const storedLevel = String(job.experience_level ?? "").toLowerCase();
+    if (storedLevel === "entry") return 0.3;
+    if (storedLevel === "mid") return 0.15;
+    if (storedLevel === "senior") return -0.3;
+
+    // Fallback: cheap keyword scoring from title+description
+    const title = String(job.title ?? "");
+    const description = String(job.description ?? "");
+    if (!title && !description) return 0;
+
+    const score = computeSeniorityScore(title, description);
+    return this.clamp(score / 15); // normalize [-10,+10] → [-0.66,+0.66]
+  }
+
+  private rankReasons(skills: string[], location: number, workStyle: number, recency: number, salary: number, seniority: number): string[] {
     const reasons: string[] = [];
     if (skills.length > 0) reasons.push("skill match");
     if (location >= 0.7) reasons.push("location match");
     if (workStyle >= 0.8) reasons.push("work style match");
     if (recency >= 0.7) reasons.push("recent posting");
     if (salary >= 1) reasons.push("salary match");
+    if (seniority >= 0.15) reasons.push("entry-level friendly");
     return reasons;
   }
 

@@ -8,6 +8,7 @@ import { JobMaintenanceController } from "./jobMaintenance.js";
 import { ResumeController } from "./resumeController.js";
 import { ResumeBuilderController } from "./resumeBuilder.js";
 import { log, logger } from "../utils/logger.js";
+import { discoverFromFeeds } from "../utils/jobFeeds.js";
 
 type ApiControllerDeps = {
   auth?: AuthController;
@@ -284,6 +285,102 @@ export function createApiRouter(db: DatabaseLike, deps: ApiControllerDeps = {}):
     } catch (e) {
       logger.error("[POST /jobs/discover]", e);
       await log(`[API] POST /jobs/discover ERROR: ${e}`);
+      res.status(500).json({ error: String(e) });
+    }
+  });
+
+  // ── Standalone feed discovery (without Firecrawl) ────────
+  router.post("/jobs/discover/feeds", async (req: Request, res: Response) => {
+    const discoverApiKey = process.env.DISCOVER_API_KEY;
+    if (discoverApiKey) {
+      const auth = req.headers.authorization;
+      if (!auth || !auth.startsWith("Bearer ") || auth.slice(7) !== discoverApiKey) {
+        res.status(401).json({ error: "Invalid or missing discover API key" });
+        return;
+      }
+    }
+
+    const body = (req.body ?? {}) as {
+      limit?: number;
+      prune_old?: boolean;
+      recompute_embeddings?: boolean;
+    };
+
+    logger.info(`[API] POST /jobs/discover/feeds — feed-only discovery`);
+    await log(`[API] POST /jobs/discover/feeds start`);
+    try {
+      // Cleanup first so new jobs go into a clean DB
+      const cleanupResult = await jobMaintenance.CleanupJobs({
+        limit: body.limit,
+        prune_old: body.prune_old ?? true,
+        recompute_embeddings: body.recompute_embeddings,
+        backfill_experience_level: true,
+      });
+      if (cleanupResult.status !== 200) {
+        logger.error(`[API] POST /jobs/discover/feeds cleanup failed → ${cleanupResult.status}`);
+        await log(`[API] POST /jobs/discover/feeds cleanup failed: ${cleanupResult.message}`);
+        res.status(cleanupResult.status).json({ cleanup: cleanupResult });
+        return;
+      }
+
+      const result = await discoverFromFeeds(db);
+      logger.info(`[API] POST /jobs/discover/feeds → ${result.total_jobs} jobs, ${result.errors.length} errors`);
+      await log(`[API] POST /jobs/discover/feeds done: ${result.total_jobs} jobs`);
+      res.json({ ...result, cleanup: cleanupResult });
+    } catch (e) {
+      logger.error("[POST /jobs/discover/feeds]", e);
+      await log(`[API] POST /jobs/discover/feeds ERROR: ${e}`);
+      res.status(500).json({ error: String(e) });
+    }
+  });
+
+  // ── Combined cleanup + discovery (feed + crawler) ────────
+  router.post("/jobs/cleanup-and-discover", async (req: Request, res: Response) => {
+    const discoverApiKey = process.env.DISCOVER_API_KEY;
+    if (discoverApiKey) {
+      const auth = req.headers.authorization;
+      if (!auth || !auth.startsWith("Bearer ") || auth.slice(7) !== discoverApiKey) {
+        res.status(401).json({ error: "Invalid or missing discover API key" });
+        return;
+      }
+    }
+
+    const body = (req.body ?? {}) as {
+      seedUrls?: string[];
+      limit?: number;
+      dry_run?: boolean;
+      prune_old?: boolean;
+      recompute_embeddings?: boolean;
+    };
+
+    logger.info(`[API] POST /jobs/cleanup-and-discover`);
+    await log(`[API] POST /jobs/cleanup-and-discover start`);
+    try {
+      // Step 1: Cleanup first — backfill experience, dedup, kill junk, prune old
+      const cleanupResult = await jobMaintenance.CleanupJobs({
+        limit: body.limit,
+        dry_run: body.dry_run,
+        prune_old: body.prune_old ?? true,
+        recompute_embeddings: body.recompute_embeddings,
+        backfill_experience_level: true,
+      });
+      if (cleanupResult.status !== 200) {
+        logger.error(`[API] POST /jobs/cleanup-and-discover cleanup failed → ${cleanupResult.status}`);
+        await log(`[API] POST /jobs/cleanup-and-discover cleanup failed: ${cleanupResult.message}`);
+        res.status(cleanupResult.status).json({ cleanup: cleanupResult });
+        return;
+      }
+
+      // Step 2: Discover (feeds + crawlers)
+      const { seedUrls } = body;
+      const result = await jobs.Discover(Array.isArray(seedUrls) ? seedUrls : undefined);
+
+      logger.info(`[API] POST /jobs/cleanup-and-discover → ${result.status} (${result.total_jobs} jobs)`);
+      await log(`[API] POST /jobs/cleanup-and-discover done: ${result.total_jobs} jobs`);
+      res.json({ ...result, cleanup: cleanupResult });
+    } catch (e) {
+      logger.error("[POST /jobs/cleanup-and-discover]", e);
+      await log(`[API] POST /jobs/cleanup-and-discover ERROR: ${e}`);
       res.status(500).json({ error: String(e) });
     }
   });

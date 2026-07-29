@@ -122,8 +122,10 @@ CONVERSATIONAL STYLE
 CONSTRAINTS
 - Never invent details about the user's experience — only use what they've told you.
 - Don't ask for sensitive data beyond what a CV needs.
-- If the user seems stuck or frustrated, drop any playfulness and just help directly.
 - NEVER ask the same question twice. If you just asked about summary and they replied, that field is DONE — move on.
+- Experience entries need: company name, role, AND at least one detailed bullet (10+ chars). Just "1 year" won't count as complete — ask for specifics.
+- Education entries need: institution name AND degree/program. Just university name without a degree won't count as complete.
+- When the user gives vague/brief answers to experience or education questions, gently follow up for specifics (company name, what you actually did, title, degree name).
 
 CALIBRATION
 Confident and personable, like someone good at their job who's on your side — not performing enthusiasm, not reciting a script. The bar: would this response feel different if you swapped in a different user's name? If not, it's too generic — make it specific to what they actually told you.
@@ -266,11 +268,10 @@ class ResumeBuilderController {
       { role: "assistant", content: chatMessage, timestamp: now },
     ];
 
-    // Recalculate ATS score
+    // Recalculate combined score (ATS structural + LLM quality)
     const resumeText = this.generateResumeText(updatedSession);
-    const atsScore = scoreResume(resumeText);
+    const atsScore = await this.computeScore(resumeText);
 
-    // Update session with score
     updatedSession.ats_score = atsScore;
     updatedSession.resume_text = resumeText;
     updatedSession.updated_at = new Date().toISOString();
@@ -326,7 +327,7 @@ class ResumeBuilderController {
     if (updates.resume_text || updates.summary || updates.skills || updates.experience) {
       const resumeText = this.generateResumeText(updatedSession);
       updatedSession.resume_text = resumeText;
-      updatedSession.ats_score = scoreResume(resumeText);
+      updatedSession.ats_score = this.computeScore(resumeText);
     }
 
     // Save updated session
@@ -354,7 +355,7 @@ class ResumeBuilderController {
     }
 
     const resumeText = this.generateResumeText(session);
-    const atsScore = scoreResume(resumeText);
+    const atsScore = await this.computeScore(resumeText);
 
     await this.updateSession(sessionId, {
       resume_text: resumeText,
@@ -393,7 +394,38 @@ class ResumeBuilderController {
 
     for (const field of REQUIRED_FIELDS) {
       const value = session[field];
-      if (Array.isArray(value)) {
+
+      if (field === 'experience') {
+        const entries = value as typeof session.experience;
+        if (!Array.isArray(entries) || entries.length === 0) {
+          missing.push(field);
+        } else {
+          const hasSubstantive = entries.some(e =>
+            e.company.trim() && e.role.trim() && e.bullets.some(b => b.trim().length > 10)
+          );
+          if (!hasSubstantive) missing.push(field);
+        }
+      } else if (field === 'skills') {
+        const entries = value as typeof session.skills;
+        if (!Array.isArray(entries) || entries.length === 0) {
+          missing.push(field);
+        } else {
+          const hasSubstantive = entries.some(c =>
+            c.skills.some(s => s.trim().length > 0)
+          );
+          if (!hasSubstantive) missing.push(field);
+        }
+      } else if (field === 'education') {
+        const entries = value as typeof session.education;
+        if (!Array.isArray(entries) || entries.length === 0) {
+          missing.push(field);
+        } else {
+          const hasSubstantive = entries.some(e =>
+            e.institution.trim() && e.degree.trim()
+          );
+          if (!hasSubstantive) missing.push(field);
+        }
+      } else if (Array.isArray(value)) {
         if (value.length === 0) {
           missing.push(field);
         }
@@ -430,6 +462,9 @@ Missing fields (your internal tracking only — never show this list): ${missing
 RULES — follow strictly:
 1. Extract information the user just gave you and update session data.
 2. If the user provides ANY non-empty answer to the field you just asked about, accept it, put it in updates, and move to the next field. Do NOT re-ask. Do NOT judge quality. Weak answers lower the score — that's a scoring problem, not a re-ask problem.
+3. For experience: company name, role, and at least one detailed bullet (10+ chars) are required to count as complete. Just "1 year" or "software engineer" alone doesn't cut it.
+4. For education: institution name AND degree/program are both required. Just "Bells University" without a degree doesn't count as complete.
+5. For skills: at least one skill tag is needed.
 3. Acknowledge what they said briefly and specifically before asking the next question. "That's a strong metric to lead with" beats "Nice!".
 4. Ask for exactly ONE missing field per turn, in this priority order:
    full_name → email → phone → location → summary → skills → experience → education
@@ -437,8 +472,9 @@ RULES — follow strictly:
 6. Keep message short — 1-2 sentences, one question. Mobile chat style.
 7. NO corporate speak. No "please provide", no "this information is crucial", no "ATS", no "as measured by".
 8. If all fields are complete, let them know their resume is ready and what the score looks like.
-9. NEVER ask the same question twice in a row. If you just asked about summary and they replied, that field is DONE — move on.
-10. If something they wrote is weak, say so plainly and suggest a concrete fix — name the exact phrase, suggest a replacement, explain why the change helps.
+9. If the calculated score is 88 or higher (even if not all fields are complete), suggest building the resume — it's already strong enough.
+10. NEVER ask the same question twice in a row. If you just asked about summary and they replied, that field is DONE — move on.
+11. If something they wrote is weak, say so plainly and suggest a concrete fix — name the exact phrase, suggest a replacement, explain why the change helps.
 
 The next field to ask about is: ${nextField ?? 'NONE — all fields filled'}
 
@@ -662,6 +698,9 @@ Return JSON:
     if (isComplete) {
       return llmMessage + '\n\nYour resume is ready! Click "Build" to generate it.';
     }
+    if (atsScore.score >= 88 && missingFields.length <= 1) {
+      return llmMessage + '\n\nYour resume is looking strong. Want me to build it now?';
+    }
     return llmMessage;
   }
 
@@ -725,6 +764,26 @@ Return JSON:
     } catch (e) {
       logger.warn(`[ResumeBuilder] Failed to pre-fill from profile: ${e}`);
       return {};
+    }
+  }
+
+  private async computeScore(resumeText: string): Promise<ATSScoreResult> {
+    const W_LLM = 0.4;
+    const W_ATS = 0.6;
+    const atsResult = scoreResume(resumeText);
+
+    try {
+      const llmResult = await this.llm.resumeScore(resumeText);
+      const llmNormalized = Math.round(llmResult.score * 100);
+      const combined = Math.round(W_LLM * llmNormalized + W_ATS * atsResult.score);
+
+      return {
+        ...atsResult,
+        score: combined,
+        suggestions: [...new Set([...llmResult.suggestions, ...atsResult.suggestions])],
+      };
+    } catch {
+      return atsResult;
     }
   }
 

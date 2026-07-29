@@ -1,5 +1,20 @@
 import { normalizeJobCleanupInput } from "./jobCleanup.js";
 
+/** Domains that host job-board pages, not individual employer listings. */
+const KNOWN_BOARD_DOMAINS = [
+  "wellfound.com",
+  "himalayas.app",
+  "remote.co",
+  "workingnomads.com",
+  "justremote.co",
+  "jobspresso.co",
+  "hiringcafe.com",
+  "dynamitejobs.com",
+  "arc.dev",
+  "cord.co",
+  "landing.jobs",
+] as const;
+
 const JUNK_URL_PARTS = [
   "/blog",
   "/about",
@@ -63,6 +78,7 @@ type NormalizedPipelineJob = PipelineJob & {
   readonly location_normalized: readonly string[] | null;
   readonly remote_status_normalized: RemoteStatusNormalized;
   readonly posted_date_parsed: string | null;
+  readonly source_site_normalized: string | null;
   readonly is_junk: boolean;
 };
 
@@ -86,6 +102,72 @@ function isJunkPage(url: string, markdown: string): boolean {
 
   const nonJobMarkerCount = NON_JOB_MARKERS.filter((marker) => normalizedMarkdown.includes(marker)).length;
   return nonJobMarkerCount >= 2 && !hasJobMarker;
+}
+
+const JOB_APPLICATION_PATH_PATTERNS = [
+  /\/job(s)?\//i,
+  /\/careers?\//i,
+  /\/position(s)?\//i,
+  /\/apply\//i,
+  /\/opportunit(y|ies)\//i,
+  /\/listing(s)?\//i,
+  /\/opening(s)?\//i,
+  /\/posting(s)?\//i,
+] as const;
+
+function extractDomain(url: string): string | null {
+  try {
+    return new URL(url).hostname.replace(/^www\./i, "").toLowerCase();
+  } catch {
+    return null;
+  }
+}
+
+function isLikelyMarketingPage(
+  company: string,
+  sourceSite: string | null,
+  title: string,
+  applyUrl: string | null,
+  sourceUrl: string,
+  description: string,
+): boolean {
+  if (!company || !title) return false;
+
+  const sourceDomain = sourceSite ? sourceSite.replace(/^(https?:\/\/)?(www\.)?/, "").replace(/\/+$/, "").toLowerCase() : null;
+
+  const desc = description.replace(/\s+/g, " ").trim().toLowerCase();
+  const hasJobMarker = JOB_MARKERS.some((m) => desc.includes(m.toLowerCase()));
+
+  if (sourceDomain) {
+    const companyDomain = extractDomain(company) || company.toLowerCase().replace(/[^a-z0-9]/g, "");
+    const sourceName = sourceDomain.replace(/\.(com|app|io|co|org).*$/, "");
+    const companyName = company.toLowerCase().replace(/[^a-z0-9]/g, "");
+
+    if (companyName.includes(sourceName) || sourceName.includes(companyName)) {
+      return true;
+    }
+
+    const isBoardDomain = KNOWN_BOARD_DOMAINS.some((d) => sourceDomain.includes(d) || d.includes(sourceDomain));
+    if (isBoardDomain && !hasJobMarker && desc.length < 300) {
+      return true;
+    }
+  }
+
+  if (applyUrl && sourceUrl) {
+    const applyDomain = extractDomain(applyUrl);
+    const srcDomain = extractDomain(sourceUrl);
+    const hasAppPath = JOB_APPLICATION_PATH_PATTERNS.some((p) => p.test(applyUrl));
+
+    if (!hasAppPath && applyDomain && srcDomain && applyDomain === srcDomain) {
+      return true;
+    }
+  }
+
+  if (desc.length < 100 && !hasJobMarker) {
+    return true;
+  }
+
+  return false;
 }
 
 function toIsoDate(date: Date): string | null {
@@ -229,6 +311,16 @@ function normalizeRemoteStatusToEnum(remoteStatus: string): RemoteStatusNormaliz
   return "unknown";
 }
 
+/** Strip protocol, www, trailing slashes from a source_site value. */
+function normalizeSourceSite(site: string | null): string | null {
+  if (!site) return null;
+  return site
+    .replace(/^https?:\/\//i, "")
+    .replace(/^www\./i, "")
+    .replace(/\/+$/, "")
+    .trim() || null;
+}
+
 /** Applies the deterministic job-processing normalization pipeline. */
 function processJobPipeline(job: PipelineJob, sourceUrl: string): NormalizedPipelineJob {
   return {
@@ -236,14 +328,18 @@ function processJobPipeline(job: PipelineJob, sourceUrl: string): NormalizedPipe
     location_normalized: normalizeLocationToArray(job.location),
     remote_status_normalized: normalizeRemoteStatusToEnum(job.remote_status),
     posted_date_parsed: parsePostedDateForSource(job.posted_date, sourceUrl),
+    source_site_normalized: normalizeSourceSite(job.source_site),
     is_junk: isJunkPage(sourceUrl, job.description),
   };
 }
 
 export {
+  extractDomain,
   isJunkPage,
+  isLikelyMarketingPage,
   normalizeLocationToArray,
   normalizeRemoteStatusToEnum,
+  normalizeSourceSite,
   parsePostedDateForSource,
   processJobPipeline,
 };

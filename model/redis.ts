@@ -285,6 +285,17 @@ class RedisModel {
       return false;
     }
   }
+
+  async scard(key: string): Promise<number> {
+    try {
+      const count = await this.client.scard(key);
+      logger.info(`[Redis] scard ${key}: ${count} members`);
+      return count ?? 0;
+    } catch (e) {
+      logger.error(`[Redis] scard ${key}:`, e);
+      return 0;
+    }
+  }
 }
 
 export type RedisLike = Pick<

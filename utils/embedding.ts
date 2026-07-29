@@ -3,6 +3,20 @@ import type { FeatureExtractionPipeline } from '@xenova/transformers';
 import { mkdirSync } from 'fs';
 import { log, logger } from "./logger.js";
 
+/** Memory threshold: model won't load if heap exceeds this (if set). */
+const MEMORY_LIMIT_MB = Number(process.env.MEMORY_LIMIT_MB) || 0;
+
+/** Model estimates: all-MiniLM-L6-v2 uses ~90MB heap once loaded. */
+const MODEL_HEAP_MB = 90;
+
+function heapMB(): number {
+  return Math.round(process.memoryUsage().heapUsed / 1024 / 1024);
+}
+
+function rssMB(): number {
+  return Math.round(process.memoryUsage().rss / 1024 / 1024);
+}
+
 class EmbeddingService {
   private static instance: EmbeddingService;
   private extractor: FeatureExtractionPipeline | null = null;
@@ -11,8 +25,6 @@ class EmbeddingService {
 
   static async getInstance(): Promise<EmbeddingService> {
     if (!EmbeddingService.instance) {
-      // Vercel serverless runtime: /var/task/ is read-only, so redirect
-      // the transformers.js model cache to /tmp/ which is writable.
       if (!process.env.TRANSFORMERS_CACHE) {
         process.env.TRANSFORMERS_CACHE = '/tmp/transformers_cache';
       }
@@ -27,16 +39,34 @@ class EmbeddingService {
     return EmbeddingService.instance;
   }
 
+  /** Unload the model to free ~90MB heap. Safe to call after batch jobs. */
+  unload(): void {
+    if (this.extractor) {
+      this.extractor = null;
+      logger.info(`[EmbeddingService] Model unloaded (heap=${heapMB()}MB, rss=${rssMB()}MB)`);
+    }
+  }
+
+  /** True if the model is currently loaded into memory. */
+  get isLoaded(): boolean {
+    return this.extractor !== null;
+  }
+
   private async getExtractor(): Promise<FeatureExtractionPipeline> {
     if (!this.extractor) {
-      logger.info('[EmbeddingService] Loading model Xenova/all-MiniLM-L6-v2...');
+      const currentHeap = heapMB();
+      if (MEMORY_LIMIT_MB > 0 && currentHeap + MODEL_HEAP_MB > MEMORY_LIMIT_MB * 0.85) {
+        logger.warn(`[EmbeddingService] MEMORY_LIMIT=${MEMORY_LIMIT_MB}MB, current heap=${currentHeap}MB — model load would exceed 85% threshold`);
+      }
+
+      logger.info(`[EmbeddingService] Loading model Xenova/all-MiniLM-L6-v2 (heap=${currentHeap}MB, rss=${rssMB()}MB)...`);
       await log('[EmbeddingService] Loading embedding model...');
       this.extractor = await pipeline(
         'feature-extraction',
         'Xenova/all-MiniLM-L6-v2',
       );
-      logger.info('[EmbeddingService] Model loaded');
-      await log('[EmbeddingService] Model loaded');
+      logger.info(`[EmbeddingService] Model loaded (heap=${heapMB()}MB, rss=${rssMB()}MB)`);
+      await log(`[EmbeddingService] Model loaded: heap=${heapMB()}MB`);
     }
     return this.extractor;
   }

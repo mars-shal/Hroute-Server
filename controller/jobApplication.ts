@@ -7,8 +7,8 @@ import type { JobMatcherService, MatchFilters, MatchProgressHandler } from "./jo
 import { log, logger } from "../utils/logger.js";
 import { SEARCHURLS, isFeedSource } from "../utils/search.js";
 import { normalizeJobCleanupInput } from "../utils/jobCleanup.js";
-import { isJunkPage, processJobPipeline } from "../utils/jobPipeline.js";
-import { processFeedsInBatches } from "../utils/jobFeeds.js";
+import { isJunkPage, isLikelyMarketingPage, processJobPipeline } from "../utils/jobPipeline.js";
+import { classifyExperienceLevel, processFeedsInBatches } from "../utils/jobFeeds.js";
 
 /** Strip carriage returns, tabs, zero-width characters from a URL string */
 function cleanUrl(raw: string): string {
@@ -87,6 +87,8 @@ class JobApplicationController {
 
             if (normalized.isStale) return;
 
+            const experienceLevel = classifyExperienceLevel(feedJob.title, normalized.description);
+
             const pipelineResult = processJobPipeline(
               {
                 title: feedJob.title,
@@ -118,6 +120,7 @@ class JobApplicationController {
               source_site: feedJob.source_site,
               source_url: feedJob.source_url,
               logo_url: feedJob.logo_url,
+              experience_level: experienceLevel,
               crawled_at: new Date().toISOString(),
             });
 
@@ -203,6 +206,20 @@ class JobApplicationController {
               continue;
             }
 
+            // ── Sanity: reject LLM-hallucinated jobs from marketing pages ──
+            if (isLikelyMarketingPage(
+              (job.company as string) ?? "",
+              (job.source_site as string) ?? seedUrl,
+              (job.title as string) ?? "",
+              (job.apply_url as string) ?? null,
+              pageUrl,
+              normalized.description,
+            )) {
+              logger.info(`[Discover] Skipping ${pageUrl} — marketing page (company="${job.company}", source_site="${job.source_site ?? seedUrl}")`);
+              await log(`[Discover] Skip (marketing): ${pageUrl}`);
+              continue;
+            }
+
             // ── Pipeline: normalize fields for Postgres enum + arrays ──
             const pipelineResult = processJobPipeline(
               {
@@ -230,6 +247,11 @@ class JobApplicationController {
               logger.info(`[Discover] Inferred remote_status=${normalized.remoteStatus} for ${pageUrl}`);
             }
 
+            const crawlerExperienceLevel = (job.experience_level as string) ?? classifyExperienceLevel(
+              (job.title as string) ?? "",
+              normalized.description,
+            );
+
             const storeRes = await this.db.storeJob({
               title: job.title,
               company: job.company,
@@ -243,6 +265,7 @@ class JobApplicationController {
               source_site: job.source_site ?? seedUrl,
               source_url: pageUrl,
               logo_url: job.logo_url ?? null,
+              experience_level: crawlerExperienceLevel,
               crawled_at: new Date().toISOString(),
             });
 
@@ -286,6 +309,27 @@ class JobApplicationController {
     await this.crawler.clearScrapedUrls();
     logger.info(`[Discover] Cleared scraped_urls from Redis`);
     await log(`[Discover] Cleared scraped_urls from Redis`);
+
+    // ── Self-check: per-run health metrics ──
+    try {
+      const selfCheckRows = await this.db.listJobs(1000, 0);
+      const jobs = Array.isArray(selfCheckRows) ? selfCheckRows : [];
+      if (jobs.length > 0) {
+        const total = jobs.length;
+        const unspecifiedExp = jobs.filter((j: Record<string, unknown>) => (j.experience_level ?? "unspecified") === "unspecified").length;
+        const sourceSites = new Set(jobs.map((j: Record<string, unknown>) => String(j.source_site ?? "")));
+        const applyUrls = jobs.map((j: Record<string, unknown>) => String(j.apply_url ?? "")).filter(Boolean);
+        const duplicateApplyUrls = applyUrls.length - new Set(applyUrls).size;
+        const pctUnspecified = ((unspecifiedExp / total) * 100).toFixed(1);
+
+        logger.info(`[Discover] Self-check: ${total} jobs in DB, ${pctUnspecified}% experience unspecified, ${sourceSites.size} distinct source_sites, ${duplicateApplyUrls} duplicate apply_urls`);
+        await log(`[Discover] Self-check: ${total} jobs, ${pctUnspecified}% unspecified exp, ${sourceSites.size} sources, ${duplicateApplyUrls} dup apply_urls`);
+      } else {
+        logger.info(`[Discover] Self-check: no jobs found in DB`);
+      }
+    } catch (checkErr) {
+      logger.warn(`[Discover] Self-check query failed: ${checkErr}`);
+    }
 
     return {
       status: 200,

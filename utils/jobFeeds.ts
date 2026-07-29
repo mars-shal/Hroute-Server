@@ -128,6 +128,46 @@ const ENTRY_PATTERNS = [
 ];
 
 /**
+ * Weighted keyword scoring for seniority, used by the JobMatcher to
+ * boost entry-level jobs and penalize senior-heavy ones in reranking.
+ * Positive score = entry/junior-friendly; negative = senior-oriented.
+ * Aggregated across both title and description.
+ */
+export function computeSeniorityScore(title: string, description: string): number {
+  const text = `${title} ${description}`;
+  let score = 0;
+
+  // Strong entry-level signals (+3 each)
+  if (/\b(junior|jr\.?)\b/i.test(text)) score += 3;
+  if (/\b(graduate|grad|new.grad)\b/i.test(text)) score += 3;
+  if (/\bintern(ship)?\b/i.test(text)) score += 3;
+  if (/\b(trainee|apprentice)\b/i.test(text)) score += 3;
+  if (/\bentry\b/i.test(text)) score += 3;
+  if (/\bnysc\b/i.test(text)) score += 3;
+  if (/\bno experience\b/i.test(text)) score += 3;
+  if (/\b0[-–]?[12] years?\b/i.test(text)) score += 3;
+
+  // Moderate entry-level signals (+2 each)
+  if (/\bassociate\b/i.test(text)) score += 2;
+  if (/\bearly career\b/i.test(text)) score += 2;
+
+  // Strong seniority penalties (-6 each)
+  if (/\b(staff|principal)\b/i.test(text)) score -= 6;
+  if (/\b(head of|director|vp|architect)\b/i.test(text)) score -= 6;
+
+  // Moderate seniority penalties (-5 each)
+  if (/\b(senior|sr\.?)\b/i.test(text)) score -= 5;
+  if (/\blead\b/i.test(text)) score -= 5;
+
+  // Minor seniority penalties (-4 each)
+  if (/\bmanager\b/i.test(text)) score -= 4;
+  if (/\b\d{1,2}\+?\s*years?\b/i.test(text)) score -= 4;
+
+  // Clamp to [-10, +10] so a single bad/good match doesn't dominate everything
+  return Math.max(-10, Math.min(10, score));
+}
+
+/**
  * Cheap keyword classifier for sources with no LLM extraction step (feeds).
  * Title checked first in isolation; falls back to title+description.
  * "unspecified" is an honest bucket rather than forcing a guess.

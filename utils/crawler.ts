@@ -15,8 +15,17 @@ type ApiHandlerData = {
   timeout: number;
 };
 
+const SCRAPED_URLS_KEY = "scraped_urls";
+/** Max entries in the scraped_urls Redis set — prevents unbounded growth on
+ * a 400MB server where Redis shares memory with the app. */
+const SCRAPED_URLS_MAX = 5000;
+
 function heapUsedMB(): number {
   return Math.round(process.memoryUsage().heapUsed / 1024 / 1024);
+}
+
+function rssMB(): number {
+  return Math.round(process.memoryUsage().rss / 1024 / 1024);
 }
 
 class Crawler {
@@ -151,7 +160,7 @@ class Crawler {
     // Filter out already-scraped URLs
     const fresh: string[] = [];
     for (const [i, link] of jobLinks.entries()) {
-      const seen = await this.redis.isMember("scraped_urls", link);
+      const seen = await this.redis.isMember(SCRAPED_URLS_KEY, link);
       if (!seen) fresh.push(link);
 
       // Log progress every 50 links to track long Redis-filter loops
@@ -162,13 +171,35 @@ class Crawler {
 
     logger.info(`[Crawler] discoverUrls exit: ${fresh.length} fresh / ${links.length} total from ${seedUrl}`);
     await log(`[Crawler] discoverUrls: ${fresh.length} fresh urls from ${seedUrl}`);
+
+    // Prune scraped_urls set when over limit to cap Redis memory
+    if (fresh.length > 0) {
+      await this.pruneScrapedUrls();
+    }
+
     return fresh;
   }
 
   // Scrape actual page content (markdown) for a list of URLs.
   // Returns { url, markdown } pairs so callers can reference the source URL.
   async clearScrapedUrls(): Promise<void> {
-    await this.redis.delete("scraped_urls");
+    await this.redis.delete(SCRAPED_URLS_KEY);
+    logger.info(`[Crawler] Cleared ${SCRAPED_URLS_KEY} from Redis (heap=${heapUsedMB()}MB, rss=${rssMB()}MB)`);
+  }
+
+  /** Keep scraped_urls set under SCRAPED_URLS_MAX by trimming oldest entries. */
+  private async pruneScrapedUrls(): Promise<void> {
+    try {
+      const count = await this.redis.scard(SCRAPED_URLS_KEY);
+      if (count > SCRAPED_URLS_MAX) {
+        const excess = count - SCRAPED_URLS_MAX;
+        const batch = Math.min(excess, 500);
+        await this.redis.spop({ key: SCRAPED_URLS_KEY, count: batch });
+        logger.info(`[Crawler] Pruned ${batch} entries from ${SCRAPED_URLS_KEY} (${count} → ~${SCRAPED_URLS_MAX}, heap=${heapUsedMB()}MB)`);
+      }
+    } catch (e) {
+      logger.warn(`[Crawler] pruneScrapedUrls error: ${e}`);
+    }
   }
 
   async scrapePages(
@@ -188,7 +219,7 @@ class Crawler {
         continue;
       }
 
-      const alreadyScraped = await this.redis.isMember("scraped_urls", url);
+      const alreadyScraped = await this.redis.isMember(SCRAPED_URLS_KEY, url);
       if (alreadyScraped) {
         logger.info(`[Crawler] scrapePages skip (already scraped): ${url}`);
         continue;
@@ -198,7 +229,7 @@ class Crawler {
       const markdown: string | undefined = res?.data?.markdown;
       if (markdown) {
         results.push({ url, markdown });
-        await this.redis.sadd({ key: "scraped_urls", member: url });
+        await this.redis.sadd({ key: SCRAPED_URLS_KEY, member: url });
         logger.info(`[Crawler] scrapePages scraped: ${url} (${markdown.length} chars)`);
       } else {
         logger.warn(`[Crawler] scrapePages no markdown: ${url}`);
