@@ -31,9 +31,16 @@ function rssMB(): number {
 class Crawler {
   private apiKey: string;
   private redis: RedisModel;
+  /** Set to true when Firecrawl returns 402 Payment Required — suppresses
+   * expensive Crawlee fallbacks for the rest of the cycle. */
+  private _firecrawlUnavailable = false;
+
+  get firecrawlUnavailable(): boolean {
+    return this._firecrawlUnavailable;
+  }
 
   constructor() {
-    this.apiKey = process.env.FIRECRAWL_API_KEY || "";
+    this.apiKey = process.env.FIRECRAWL_API_KEY ?? "";
     this.redis = new RedisModel();
   }
 
@@ -68,10 +75,21 @@ class Crawler {
         const detail = JSON.stringify(e.response.data);
         logger.error(`[Crawler] fireScraper ${body_url} response:`, detail);
         await log(`[Crawler] fireScraper ${body_url} ERROR: ${detail}`);
+        // Detect out-of-credits — suppress all fallbacks for rest of cycle
+        if (e.response.status === 402) {
+          this._firecrawlUnavailable = true;
+          logger.warn(`[Crawler] Firecrawl out of credits — skipping Crawlee fallback for ${body_url} and all remaining URLs`);
+          await log(`[Crawler] Firecrawl out of credits — skipping Crawlee fallback`);
+          return null;
+        }
       } else {
         await log(`[Crawler] fireScraper ${body_url} ERROR: ${e}`);
       }
-      // Fallback to Crawlee when Firecrawl fails
+      // Fallback to Crawlee when Firecrawl fails (unless credits exhausted)
+      if (this._firecrawlUnavailable) {
+        logger.info(`[Crawler] fireScraper skip fallback (credits exhausted): ${body_url}`);
+        return null;
+      }
       logger.info(`[Crawler] fireScraper fallback to Crawlee: ${body_url}`);
       await log(`[Crawler] fireScraper fallback Crawlee: ${body_url}`);
       const fallback = await scrapePage(body_url);
@@ -114,8 +132,18 @@ class Crawler {
         const detail = JSON.stringify(e.response.data);
         logger.error(`[Crawler] fireMap ${body_url} response body:`, detail);
         await log(`[Crawler] fireMap ${body_url} ERROR: ${detail}`);
+        if (e.response.status === 402) {
+          this._firecrawlUnavailable = true;
+          logger.warn(`[Crawler] Firecrawl out of credits — skipping fallback for ${body_url}`);
+          await log(`[Crawler] Firecrawl out of credits — map fallback skipped`);
+          return null;
+        }
       } else {
         await log(`[Crawler] fireMap ${body_url} ERROR: ${e}`);
+      }
+      if (this._firecrawlUnavailable) {
+        logger.info(`[Crawler] fireMap skip fallback (credits exhausted): ${body_url}`);
+        return null;
       }
       // Tier 2: Crawlee <a> scraping fallback
       logger.info(`[Crawler] fireMap fallback to Crawlee: ${body_url}`);

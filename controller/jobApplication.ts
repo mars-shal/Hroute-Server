@@ -18,6 +18,10 @@ function cleanUrl(raw: string): string {
     .replace(/[\u200B-\u200D\uFEFF]/g, "");
 }
 
+/** Max wall-clock time to spend on a single seed URL (feed or crawler).
+ * Prevents a slow/scraping-incompatible site from blocking all 45+ seeds. */
+const PER_SEED_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
+
 interface DiscoverResult {
   status: number;
   message: string;
@@ -54,254 +58,274 @@ class JobApplicationController {
         await new Promise((r) => setTimeout(r, delay));
       }
 
+      // Wrap each seed with a timeout so a single slow site doesn't block all 45+
+      const seedLabel = `[${seedIdx + 1}/${urls.length}]`;
       try {
-        logger.info(`[Discover] Processing seed [${seedIdx + 1}/${urls.length}]: ${seedUrl}`);
-        await log(`[Discover] Seed ${seedIdx + 1}/${urls.length}: ${seedUrl}`);
+        await Promise.race([
+          (async () => {
+            logger.info(`[Discover] Seed ${seedLabel}: ${seedUrl}`);
+            await log(`[Discover] Seed ${seedLabel}: ${seedUrl}`);
 
-        // ── Feed path: free public APIs skip Firecrawl + LLM ──
-        if (isFeedSource(seedUrl)) {
-          logger.info(`[Discover] Feed source: ${seedUrl} — bypassing Firecrawl`);
-          await log(`[Discover] Feed source: ${seedUrl}`);
+            // ── Feed path: free public APIs skip Firecrawl + LLM ──
+            if (isFeedSource(seedUrl)) {
+              logger.info(`[Discover] Feed source: ${seedUrl} — bypassing Firecrawl`);
+              await log(`[Discover] Feed source: ${seedUrl}`);
 
-          const seedHostname = new URL(seedUrl).hostname.replace("www.", "");
-          const embeddingService = await EmbeddingService.getInstance();
-          let seedJobs = 0;
+              const seedHostname = new URL(seedUrl).hostname.replace("www.", "");
+              const embeddingService = await EmbeddingService.getInstance();
+              let seedJobs = 0;
 
-          const { processed, errors: feedErrors } = await processFeedsInBatches(async (feedJob) => {
-            let jobHostname: string;
-            try {
-              jobHostname = new URL(feedJob.source_url).hostname.replace("www.", "");
-            } catch {
+              const { processed, errors: feedErrors } = await processFeedsInBatches(async (feedJob) => {
+                let jobHostname: string;
+                try {
+                  jobHostname = new URL(feedJob.source_url).hostname.replace("www.", "");
+                } catch {
+                  return;
+                }
+                if (!jobHostname.includes(seedHostname)) return;
+
+                const normalized = normalizeJobCleanupInput({
+                  description: feedJob.description,
+                  skills: feedJob.skills.length > 0 ? feedJob.skills : undefined,
+                  remoteStatus: feedJob.remote_status ?? undefined,
+                  applyUrl: feedJob.apply_url ?? undefined,
+                  sourceUrl: feedJob.source_url,
+                  postedDate: feedJob.posted_date,
+                });
+
+                if (normalized.isStale) return;
+
+                const experienceLevel = classifyExperienceLevel(feedJob.title, normalized.description);
+
+                const pipelineResult = processJobPipeline(
+                  {
+                    title: feedJob.title,
+                    company: feedJob.company,
+                    location: feedJob.location,
+                    description: normalized.description,
+                    skills: normalized.skills,
+                    remote_status: normalized.remoteStatus,
+                    salary_range: feedJob.salary_range,
+                    apply_url: normalized.applyUrl,
+                    posted_date: feedJob.posted_date,
+                    source_site: feedJob.source_site,
+                    source_url: feedJob.source_url,
+                    logo_url: feedJob.logo_url,
+                  },
+                  feedJob.source_url,
+                );
+
+                const storeRes = await this.db.storeJob({
+                  title: feedJob.title,
+                  company: feedJob.company,
+                  location: feedJob.location,
+                  description: normalized.description,
+                  skills: normalized.skills,
+                  remote_status: pipelineResult.remote_status_normalized,
+                  salary_range: feedJob.salary_range,
+                  apply_url: normalized.applyUrl,
+                  posted_date: pipelineResult.posted_date_parsed ?? feedJob.posted_date,
+                  source_site: feedJob.source_site,
+                  source_url: feedJob.source_url,
+                  logo_url: feedJob.logo_url,
+                  experience_level: experienceLevel,
+                  crawled_at: new Date().toISOString(),
+                });
+
+                const storedJob = storeRes.data as
+                  | Array<{ id: string }>
+                  | { id: string }
+                  | undefined;
+                const jobId =
+                  storedJob && Array.isArray(storedJob)
+                    ? storedJob[0]?.id
+                    : (storedJob as { id: string } | undefined)?.id;
+
+                if (jobId && normalized.description.length > 20) {
+                  const vector = await embeddingService.embed(normalized.description);
+                  await this.db.storeJobVector(jobId, vector);
+                  await this.matcher.bumpJobsIndexVersion();
+                }
+                seedJobs++;
+              });
+
+              totalJobs += seedJobs;
+              errors.push(...feedErrors);
+              logger.info(`[Discover] Feed seed done: ${seedJobs} jobs from ${seedUrl}`);
+              await log(`[Discover] Feed seed done: ${seedJobs} jobs from ${seedUrl}`);
               return;
             }
-            if (!jobHostname.includes(seedHostname)) return;
 
-            const normalized = normalizeJobCleanupInput({
-              description: feedJob.description,
-              skills: feedJob.skills.length > 0 ? feedJob.skills : undefined,
-              remoteStatus: feedJob.remote_status ?? undefined,
-              applyUrl: feedJob.apply_url ?? undefined,
-              sourceUrl: feedJob.source_url,
-              postedDate: feedJob.posted_date,
-            });
-
-            if (normalized.isStale) return;
-
-            const experienceLevel = classifyExperienceLevel(feedJob.title, normalized.description);
-
-            const pipelineResult = processJobPipeline(
-              {
-                title: feedJob.title,
-                company: feedJob.company,
-                location: feedJob.location,
-                description: normalized.description,
-                skills: normalized.skills,
-                remote_status: normalized.remoteStatus,
-                salary_range: feedJob.salary_range,
-                apply_url: normalized.applyUrl,
-                posted_date: feedJob.posted_date,
-                source_site: feedJob.source_site,
-                source_url: feedJob.source_url,
-                logo_url: feedJob.logo_url,
-              },
-              feedJob.source_url,
-            );
-
-            const storeRes = await this.db.storeJob({
-              title: feedJob.title,
-              company: feedJob.company,
-              location: feedJob.location,
-              description: normalized.description,
-              skills: normalized.skills,
-              remote_status: pipelineResult.remote_status_normalized,
-              salary_range: feedJob.salary_range,
-              apply_url: normalized.applyUrl,
-              posted_date: pipelineResult.posted_date_parsed ?? feedJob.posted_date,
-              source_site: feedJob.source_site,
-              source_url: feedJob.source_url,
-              logo_url: feedJob.logo_url,
-              experience_level: experienceLevel,
-              crawled_at: new Date().toISOString(),
-            });
-
-            const storedJob = storeRes.data as
-              | Array<{ id: string }>
-              | { id: string }
-              | undefined;
-            const jobId =
-              storedJob && Array.isArray(storedJob)
-                ? storedJob[0]?.id
-                : (storedJob as { id: string } | undefined)?.id;
-
-            if (jobId && normalized.description.length > 20) {
-              const vector = await embeddingService.embed(normalized.description);
-              await this.db.storeJobVector(jobId, vector);
-              await this.matcher.bumpJobsIndexVersion();
-            }
-            seedJobs++;
-          });
-
-          totalJobs += seedJobs;
-          errors.push(...feedErrors);
-          logger.info(`[Discover] Feed seed done: ${seedJobs} jobs from ${seedUrl}`);
-          await log(`[Discover] Feed seed done: ${seedJobs} jobs from ${seedUrl}`);
-          continue;
-        }
-
-        // ── Firecrawl path: discover + scrape + LLM extract ──
-        const links = await this.crawler.discoverUrls(seedUrl);
-        if (links.length === 0) {
-          logger.info(`[Discover] No new links from ${seedUrl}`);
-          await log(`[Discover] No links from ${seedUrl}`);
-          continue;
-        }
-        logger.info(`[Discover] Found ${links.length} links from ${seedUrl}`);
-
-        const pages = await this.crawler.scrapePages(links);
-        if (pages.length === 0) {
-          logger.info(`[Discover] No new content from ${seedUrl}`);
-          await log(`[Discover] No content from ${seedUrl}`);
-          continue;
-        }
-        logger.info(`[Discover] Scraped ${pages.length} pages from ${seedUrl}`);
-
-        const embeddingService = await EmbeddingService.getInstance();
-        let seedJobs = 0;
-
-        for (const { url: pageUrl, markdown } of pages) {
-          try {
-            // ── Pipeline: junk filter (saves LLM API calls) ──
-            if (isJunkPage(pageUrl, markdown)) {
-              logger.info(`[Discover] Skipping ${pageUrl} — junk page detected`);
-              await log(`[Discover] Skip (junk): ${pageUrl}`);
-              continue;
+            // ── Firecrawl path: discover + scrape + LLM extract ──
+            if (this.crawler.firecrawlUnavailable) {
+              logger.info(`[Discover] Skipping crawler seed (Firecrawl credits exhausted): ${seedUrl}`);
+              await log(`[Discover] Skip (no credits): ${seedUrl}`);
+              return;
             }
 
-            const job = await this.llm.extractJob(markdown);
-
-            if (!job.title || !job.company) {
-              logger.warn(`[Discover] Skipping ${pageUrl} — LLM returned incomplete job`);
-              await log(`[Discover] LLM skip (incomplete): ${pageUrl}`);
-              continue;
+            const links = await this.crawler.discoverUrls(seedUrl);
+            if (links.length === 0) {
+              logger.info(`[Discover] No new links from ${seedUrl}`);
+              await log(`[Discover] No links from ${seedUrl}`);
+              return;
             }
+            logger.info(`[Discover] Found ${links.length} links from ${seedUrl}`);
 
-            const normalized = normalizeJobCleanupInput({
-              description:
-                typeof job.description === "string" && job.description.trim().length > 0
-                  ? job.description
-                  : markdown.slice(0, 2000),
-              skills: Array.isArray(job.skills)
-                ? job.skills.filter((skill): skill is string => typeof skill === "string")
-                : undefined,
-              remoteStatus: typeof job.remote_status === "string" ? job.remote_status : undefined,
-              applyUrl: typeof job.apply_url === "string" ? job.apply_url : undefined,
-              sourceUrl: pageUrl,
-              postedDate: job.posted_date,
-            });
-
-            if (normalized.isStale) {
-              const ageDays = normalized.ageDays ?? 0;
-              logger.info(`[Discover] Skipping ${pageUrl} — posted ${ageDays.toFixed(0)} days ago (>60)`);
-              await log(`[Discover] Skip (old): ${pageUrl} (${ageDays.toFixed(0)}d)`);
-              continue;
+            const pages = await this.crawler.scrapePages(links);
+            if (pages.length === 0) {
+              logger.info(`[Discover] No new content from ${seedUrl}`);
+              await log(`[Discover] No content from ${seedUrl}`);
+              return;
             }
+            logger.info(`[Discover] Scraped ${pages.length} pages from ${seedUrl}`);
 
-            // ── Sanity: reject LLM-hallucinated jobs from marketing pages ──
-            if (isLikelyMarketingPage(
-              (job.company as string) ?? "",
-              (job.source_site as string) ?? seedUrl,
-              (job.title as string) ?? "",
-              (job.apply_url as string) ?? null,
-              pageUrl,
-              normalized.description,
-            )) {
-              logger.info(`[Discover] Skipping ${pageUrl} — marketing page (company="${job.company}", source_site="${job.source_site ?? seedUrl}")`);
-              await log(`[Discover] Skip (marketing): ${pageUrl}`);
-              continue;
-            }
+            const embeddingService = await EmbeddingService.getInstance();
+            let seedJobs = 0;
 
-            // ── Pipeline: normalize fields for Postgres enum + arrays ──
-            const pipelineResult = processJobPipeline(
-              {
-                title: job.title,
-                company: job.company,
-                location: job.location ?? null,
-                description: normalized.description,
-                skills: normalized.skills,
-                remote_status: normalized.remoteStatus,
-                salary_range: job.salary_range ?? null,
-                apply_url: normalized.applyUrl,
-                posted_date: job.posted_date ?? null,
-                source_site: job.source_site ?? seedUrl,
-                source_url: pageUrl,
-                logo_url: job.logo_url ?? null,
-              },
-              pageUrl,
-            );
+            for (const { url: pageUrl, markdown } of pages) {
+              try {
+                if (isJunkPage(pageUrl, markdown)) {
+                  logger.info(`[Discover] Skipping ${pageUrl} — junk page detected`);
+                  await log(`[Discover] Skip (junk): ${pageUrl}`);
+                  continue;
+                }
 
-            if ((!Array.isArray(job.skills) || job.skills.length === 0) && normalized.skills.length > 0) {
-              logger.info(`[Discover] Inferred ${normalized.skills.length} skills from description for ${pageUrl}`);
-            }
+                const job = await this.llm.extractJob(markdown);
 
-            if ((typeof job.remote_status !== "string" || job.remote_status === "unknown") && normalized.remoteStatus !== "unknown") {
-              logger.info(`[Discover] Inferred remote_status=${normalized.remoteStatus} for ${pageUrl}`);
-            }
+                if (!job.title || !job.company) {
+                  logger.warn(`[Discover] Skipping ${pageUrl} — LLM returned incomplete job`);
+                  await log(`[Discover] LLM skip (incomplete): ${pageUrl}`);
+                  continue;
+                }
 
-            const crawlerExperienceLevel = (job.experience_level as string) ?? classifyExperienceLevel(
-              (job.title as string) ?? "",
-              normalized.description,
-            );
+                const normalized = normalizeJobCleanupInput({
+                  description:
+                    typeof job.description === "string" && job.description.trim().length > 0
+                      ? job.description
+                      : markdown.slice(0, 2000),
+                  skills: Array.isArray(job.skills)
+                    ? job.skills.filter((skill): skill is string => typeof skill === "string")
+                    : undefined,
+                  remoteStatus: typeof job.remote_status === "string" ? job.remote_status : undefined,
+                  applyUrl: typeof job.apply_url === "string" ? job.apply_url : undefined,
+                  sourceUrl: pageUrl,
+                  postedDate: job.posted_date,
+                });
 
-            const storeRes = await this.db.storeJob({
-              title: job.title,
-              company: job.company,
-              location: job.location ?? null,
-              description: normalized.description,
-              skills: normalized.skills,
-              remote_status: pipelineResult.remote_status_normalized,
-              salary_range: job.salary_range ?? null,
-              apply_url: normalized.applyUrl,
-              posted_date: pipelineResult.posted_date_parsed ?? job.posted_date ?? null,
-              source_site: job.source_site ?? seedUrl,
-              source_url: pageUrl,
-              logo_url: job.logo_url ?? null,
-              experience_level: crawlerExperienceLevel,
-              crawled_at: new Date().toISOString(),
-            });
+                if (normalized.isStale) {
+                  const ageDays = normalized.ageDays ?? 0;
+                  logger.info(`[Discover] Skipping ${pageUrl} — posted ${ageDays.toFixed(0)} days ago (>60)`);
+                  await log(`[Discover] Skip (old): ${pageUrl} (${ageDays.toFixed(0)}d)`);
+                  continue;
+                }
 
-            const storedJob = storeRes.data as
-              | Array<{ id: string }>
-              | { id: string }
-              | undefined;
-            const jobId =
-              storedJob && Array.isArray(storedJob)
-                ? storedJob[0]?.id
-                : (storedJob as { id: string } | undefined)?.id;
+                if (isLikelyMarketingPage(
+                  (job.company as string) ?? "",
+                  (job.source_site as string) ?? seedUrl,
+                  (job.title as string) ?? "",
+                  (job.apply_url as string) ?? null,
+                  pageUrl,
+                  normalized.description,
+                )) {
+                  logger.info(`[Discover] Skipping ${pageUrl} — marketing page (company="${job.company}", source_site="${job.source_site ?? seedUrl}")`);
+                  await log(`[Discover] Skip (marketing): ${pageUrl}`);
+                  continue;
+                }
 
-            if (jobId) {
-              if (normalized.description.length > 20) {
-                const vector = await embeddingService.embed(normalized.description);
-                await this.db.storeJobVector(jobId, vector);
-                await this.matcher.bumpJobsIndexVersion();
+                const pipelineResult = processJobPipeline(
+                  {
+                    title: job.title,
+                    company: job.company,
+                    location: job.location ?? null,
+                    description: normalized.description,
+                    skills: normalized.skills,
+                    remote_status: normalized.remoteStatus,
+                    salary_range: job.salary_range ?? null,
+                    apply_url: normalized.applyUrl,
+                    posted_date: job.posted_date ?? null,
+                    source_site: job.source_site ?? seedUrl,
+                    source_url: pageUrl,
+                    logo_url: job.logo_url ?? null,
+                  },
+                  pageUrl,
+                );
+
+                if ((!Array.isArray(job.skills) || job.skills.length === 0) && normalized.skills.length > 0) {
+                  logger.info(`[Discover] Inferred ${normalized.skills.length} skills from description for ${pageUrl}`);
+                }
+
+                if ((typeof job.remote_status !== "string" || job.remote_status === "unknown") && normalized.remoteStatus !== "unknown") {
+                  logger.info(`[Discover] Inferred remote_status=${normalized.remoteStatus} for ${pageUrl}`);
+                }
+
+                const crawlerExperienceLevel = (job.experience_level as string) ?? classifyExperienceLevel(
+                  (job.title as string) ?? "",
+                  normalized.description,
+                );
+
+                const storeRes = await this.db.storeJob({
+                  title: job.title,
+                  company: job.company,
+                  location: job.location ?? null,
+                  description: normalized.description,
+                  skills: normalized.skills,
+                  remote_status: pipelineResult.remote_status_normalized,
+                  salary_range: job.salary_range ?? null,
+                  apply_url: normalized.applyUrl,
+                  posted_date: pipelineResult.posted_date_parsed ?? job.posted_date ?? null,
+                  source_site: job.source_site ?? seedUrl,
+                  source_url: pageUrl,
+                  logo_url: job.logo_url ?? null,
+                  experience_level: crawlerExperienceLevel,
+                  crawled_at: new Date().toISOString(),
+                });
+
+                const storedJob = storeRes.data as
+                  | Array<{ id: string }>
+                  | { id: string }
+                  | undefined;
+                const jobId =
+                  storedJob && Array.isArray(storedJob)
+                    ? storedJob[0]?.id
+                    : (storedJob as { id: string } | undefined)?.id;
+
+                if (jobId) {
+                  if (normalized.description.length > 20) {
+                    const vector = await embeddingService.embed(normalized.description);
+                    await this.db.storeJobVector(jobId, vector);
+                    await this.matcher.bumpJobsIndexVersion();
+                  }
+                  totalJobs++;
+                  seedJobs++;
+                  logger.info(`[Discover] Job stored: "${job.title}" @ ${job.company} (${pageUrl})`);
+                } else {
+                  logger.warn(`[Discover] storeJob returned no jobId for ${pageUrl}`);
+                }
+              } catch (pageErr) {
+                errors.push(`Failed to process ${pageUrl}: ${pageErr}`);
+                logger.error(`[Discover] Page error ${pageUrl}:`, pageErr);
               }
-              totalJobs++;
-              seedJobs++;
-              logger.info(`[Discover] Job stored: "${job.title}" @ ${job.company} (${pageUrl})`);
-            } else {
-              logger.warn(`[Discover] storeJob returned no jobId for ${pageUrl}`);
             }
-          } catch (pageErr) {
-            errors.push(`Failed to process ${pageUrl}: ${pageErr}`);
-            logger.error(`[Discover] Page error ${pageUrl}:`, pageErr);
-          }
-        }
 
-        logger.info(`[Discover] Seed ${seedIdx + 1} complete: ${seedJobs} jobs from ${seedUrl}`);
-        await log(`[Discover] Seed ${seedIdx + 1} done: ${seedJobs} jobs, ${errors.length} errors total`);
+            logger.info(`[Discover] Seed ${seedLabel} complete: ${seedJobs} jobs from ${seedUrl}`);
+            await log(`[Discover] Seed ${seedLabel} done: ${seedJobs} jobs, ${errors.length} errors total`);
+          })(),
+          new Promise<void>((_, reject) =>
+            setTimeout(
+              () => reject(new Error(`Seed timeout after ${PER_SEED_TIMEOUT_MS / 1000}s`)),
+              PER_SEED_TIMEOUT_MS,
+            ),
+          ),
+        ]);
       } catch (seedErr) {
-        errors.push(`Failed to process seed ${seedUrl}: ${seedErr}`);
-        logger.error(`[Discover] Seed error ${seedUrl}:`, seedErr);
-        await log(`[Discover] Seed ${seedUrl} ERROR: ${seedErr}`);
+        errors.push(`Seed ${seedUrl}: ${seedErr instanceof Error ? seedErr.message : String(seedErr)}`);
+        if (seedErr instanceof Error && seedErr.message.includes("timeout")) {
+          logger.warn(`[Discover] Seed ${seedLabel} TIMEOUT: ${seedUrl}`);
+          await log(`[Discover] Seed ${seedLabel} TIMEOUT: ${seedUrl}`);
+        } else {
+          logger.error(`[Discover] Seed error ${seedUrl}:`, seedErr);
+          await log(`[Discover] Seed ${seedUrl} ERROR: ${seedErr}`);
+        }
       }
     }
 
