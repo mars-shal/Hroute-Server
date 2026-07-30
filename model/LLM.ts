@@ -58,19 +58,51 @@ interface CompletionOptions {
   model?: LLMModel;
   temperature?: number;
   max_tokens?: number;
+  /** Models to fall back to when the primary is rate limited, in priority order. */
+  fallbackModels?: LLMModel[];
 }
+
+const MODEL_FALLBACKS: Record<LLMModel, LLMModel[]> = {
+  'llama-3.1-8b-instant': ['gemma2-9b-it', 'mixtral-8x7b-32768', 'llama-3.3-70b-versatile'],
+  'gemma2-9b-it': ['mixtral-8x7b-32768', 'llama-3.1-8b-instant', 'llama-3.3-70b-versatile'],
+  'mixtral-8x7b-32768': ['gemma2-9b-it', 'llama-3.1-8b-instant', 'llama-3.3-70b-versatile'],
+  'llama-3.3-70b-versatile': ['llama-3.1-8b-instant', 'gemma2-9b-it', 'mixtral-8x7b-32768'],
+};
 
 class LLM {
   private client: Groq;
   private redis: RedisModel | null;
+  private maxConcurrent: number;
+  private active = 0;
+  private pending: Array<() => void> = [];
 
-  constructor() {
+  constructor(maxConcurrent = 2) {
     this.client = new Groq({ apiKey: process.env.GROQ_API_KEY });
+    this.maxConcurrent = maxConcurrent;
     // Redis is optional — used to persist rate-limit cooldowns across restarts
     this.redis =
       process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN
         ? new RedisModel()
         : null;
+  }
+
+  private async acquire(): Promise<void> {
+    if (this.active < this.maxConcurrent) {
+      this.active++;
+      return;
+    }
+    return new Promise((resolve) => {
+      this.pending.push(resolve);
+    });
+  }
+
+  private release(): void {
+    const next = this.pending.shift();
+    if (next) {
+      next();
+    } else {
+      this.active--;
+    }
   }
 
   private async isRateLimited(model: string): Promise<boolean> {
@@ -124,66 +156,86 @@ class LLM {
     retries = 3,
   ): Promise<string> {
     const {
-      model = 'llama-3.3-70b-versatile',
+      model: primaryModel = 'llama-3.3-70b-versatile',
       temperature = 0.7,
       max_tokens = 1024,
+      fallbackModels,
     } = options;
 
-    for (let attempt = 1; attempt <= retries; attempt++) {
-      // Skip the call if the model is in cooldown (e.g. daily TPD exhausted)
-      if (attempt === 1 && (await this.isRateLimited(model))) {
-        throw new Error(`Rate limited: ${model} is in cooldown`);
+    const modelsToTry: LLMModel[] = [
+      primaryModel,
+      ...(fallbackModels ?? MODEL_FALLBACKS[primaryModel] ?? []),
+    ];
+
+    let lastError: Error | undefined;
+
+    for (const model of modelsToTry) {
+      if (await this.isRateLimited(model)) {
+        logger.warn(`[LLM] skipping ${model} — in cooldown, trying next model`);
+        lastError = new Error(`Rate limited: ${model} is in cooldown`);
+        continue;
       }
 
-      try {
-        logger.info(`[LLM] complete calling ${model} attempt=${attempt} (messages=${messages.length}, max_tokens=${max_tokens})`);
-        if (attempt === 1) await log(`[LLM] complete: model=${model} messages=${messages.length}`);
+      for (let attempt = 1; attempt <= retries; attempt++) {
+        await this.acquire();
+        try {
+          logger.info(`[LLM] complete calling ${model} attempt=${attempt} (messages=${messages.length}, max_tokens=${max_tokens})`);
+          if (attempt === 1) await log(`[LLM] complete: model=${model} messages=${messages.length}`);
 
-        const res = await this.client.chat.completions.create({
-          messages,
-          model,
-          temperature,
-          max_tokens,
-        });
+          const res = await this.client.chat.completions.create({
+            messages,
+            model,
+            temperature,
+            max_tokens,
+          });
 
-        const content = res.choices[0]?.message?.content;
-        if (!content) throw new Error('Empty response from Groq');
+          const content = res.choices[0]?.message?.content;
+          if (!content) throw new Error('Empty response from Groq');
 
-        logger.info(`[LLM] complete success (${content.length} chars)`);
-        return content;
-      } catch (err) {
-        const isRateLimit =
-          (err as { status?: number })?.status === 429 ||
-          (err as { status?: number })?.status === 413 ||
-          String(err).includes('rate_limit_exceeded') ||
-          String(err).includes('Rate limit reached');
+          logger.info(`[LLM] complete success (${content.length} chars, model=${model})`);
+          return content;
+        } catch (err) {
+          const isRateLimit =
+            (err as { status?: number })?.status === 429 ||
+            (err as { status?: number })?.status === 413 ||
+            String(err).includes('rate_limit_exceeded') ||
+            String(err).includes('Rate limit reached');
 
-        if (isRateLimit && attempt < retries) {
-          const waitMs = Math.min(5000 * attempt, 30000);
-          logger.warn(`[LLM] rate limit on ${model} (attempt ${attempt}/${retries}), waiting ${waitMs}ms`);
-          await log(`[LLM] rate limit wait ${waitMs}ms (attempt ${attempt}/${retries})`);
+          if (!isRateLimit) {
+            logger.error(`[LLM] complete error on ${model}:`, err);
+            await log(`[LLM] complete ERROR on ${model}: ${err}`);
+            lastError = err instanceof Error ? err : new Error(String(err));
+            break;
+          }
 
-          // Persist cooldown if the retry-after is hours-scale (TPD, not TPM)
           const retryAfter = this.parseRetryAfter(String(err));
           if (retryAfter && retryAfter > 120) {
             await this.persistRateLimit(model, retryAfter);
-            // Don't keep retrying for daily limits — skip the rest
-            logger.warn(`[LLM] daily rate limit detected (${retryAfter}s cooldown), aborting retries`);
-            await log(`[LLM] daily rate limit (${retryAfter}s), aborting retries for ${model}`);
-            throw err;
+            logger.warn(`[LLM] daily rate limit on ${model} (${retryAfter}s), trying next model`);
+            await log(`[LLM] daily rate limit ${model}, switching models`);
+            lastError = err instanceof Error ? err : new Error(String(err));
+            break;
           }
 
-          await new Promise((r) => setTimeout(r, waitMs));
-          continue;
-        }
+          if (attempt < retries) {
+            const waitMs = Math.min(5000 * attempt, 30000);
+            logger.warn(`[LLM] rate limit on ${model} (attempt ${attempt}/${retries}), waiting ${waitMs}ms`);
+            await log(`[LLM] rate limit wait ${waitMs}ms (attempt ${attempt}/${retries})`);
+            await new Promise((r) => setTimeout(r, waitMs));
+            continue;
+          }
 
-        logger.error('[LLM] complete error:', err);
-        await log(`[LLM] complete ERROR: ${err}`);
-        throw err;
+          logger.warn(`[LLM] ${model} exhausted ${retries} retries, trying next model`);
+          await log(`[LLM] ${model} exhausted, falling back`);
+          lastError = err instanceof Error ? err : new Error(String(err));
+          break;
+        } finally {
+          this.release();
+        }
       }
     }
 
-    throw new Error(`[LLM] complete exhausted ${retries} retries for ${model}`);
+    throw lastError ?? new Error(`[LLM] all models exhausted for ${primaryModel}`);
   }
 
   async chat(
