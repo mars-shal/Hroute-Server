@@ -49,9 +49,7 @@ interface Message {
   content: string;
 }
 
-type LLMModel =
-  | 'llama-3.3-70b-versatile'
-  | 'llama-3.1-8b-instant';
+type LLMModel = 'llama-3.3-70b-versatile';
 
 interface CompletionOptions {
   model?: LLMModel;
@@ -61,8 +59,7 @@ interface CompletionOptions {
 }
 
 const MODEL_FALLBACKS: Record<LLMModel, LLMModel[]> = {
-  'llama-3.3-70b-versatile': ['llama-3.1-8b-instant'],
-  'llama-3.1-8b-instant': ['llama-3.3-70b-versatile'],
+  'llama-3.3-70b-versatile': [],
 };
 
 class LLM {
@@ -80,7 +77,7 @@ class LLM {
     this.client = new Groq({ apiKey: process.env.GROQ_API_KEY });
     this.maxConcurrent = maxConcurrent;
     this.primaryModel = (process.env.LLM_PRIMARY_MODEL as LLMModel) || 'llama-3.3-70b-versatile';
-    this.fastModel = (process.env.LLM_FAST_MODEL as LLMModel) || 'llama-3.1-8b-instant';
+    this.fastModel = (process.env.LLM_FAST_MODEL as LLMModel) || 'llama-3.3-70b-versatile';
     this.googleModel = process.env.GOOGLE_MODEL || 'gemini-3.6-flash';
     this.redis =
       process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN
