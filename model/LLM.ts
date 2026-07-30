@@ -1,4 +1,5 @@
 import Groq from 'groq-sdk';
+import { GoogleGenAI } from '@google/genai';
 import { log, logger } from "../utils/logger.js";
 import { reformatResumeMarkdown } from '../utils/resumeReformat.js';
 import { RedisModel } from "./redis.js";
@@ -76,16 +77,27 @@ class LLM {
   private pending: Array<() => void> = [];
   primaryModel: LLMModel;
   fastModel: LLMModel;
+  private googleAi: GoogleGenAI | null = null;
+  private googleModel: string;
 
   constructor(maxConcurrent = 2) {
     this.client = new Groq({ apiKey: process.env.GROQ_API_KEY });
     this.maxConcurrent = maxConcurrent;
     this.primaryModel = (process.env.LLM_PRIMARY_MODEL as LLMModel) || 'llama-3.3-70b-versatile';
     this.fastModel = (process.env.LLM_FAST_MODEL as LLMModel) || 'openai/gpt-oss-20b';
+    this.googleModel = process.env.GOOGLE_MODEL || 'gemini-3.6-flash';
     this.redis =
       process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN
         ? new RedisModel()
         : null;
+  }
+
+  private getGoogleClient(): GoogleGenAI | null {
+    if (!process.env.GOOGLE_API_KEY) return null;
+    if (!this.googleAi) {
+      this.googleAi = new GoogleGenAI({ apiKey: process.env.GOOGLE_API_KEY });
+    }
+    return this.googleAi;
   }
 
   private async acquire(): Promise<void> {
@@ -251,7 +263,55 @@ class LLM {
       }
     }
 
+    const googleClient = this.getGoogleClient();
+    if (googleClient) {
+      logger.warn(`[LLM] all Groq models failed, falling back to Google ${this.googleModel}`);
+      await log(`[LLM] falling back to Google ${this.googleModel}`);
+      try {
+        return await this.completeGoogle(messages, { temperature, max_tokens });
+      } catch (googleErr) {
+        lastError = googleErr instanceof Error ? googleErr : new Error(String(googleErr));
+        logger.error(`[LLM] Google fallback also failed:`, googleErr);
+        await log(`[LLM] Google fallback failed: ${String(googleErr).slice(0, 200)}`);
+      }
+    }
+
     throw lastError ?? new Error(`[LLM] all models exhausted for ${actualPrimary}`);
+  }
+
+  private async completeGoogle(
+    messages: Message[],
+    options: CompletionOptions,
+  ): Promise<string> {
+    const client = this.getGoogleClient();
+    const model = this.googleModel;
+    const { temperature = 0.7, max_tokens = 1024 } = options;
+
+    const systemMsg = messages.find((m) => m.role === 'system');
+    const userContent = messages
+      .filter((m) => m.role !== 'system')
+      .map((m) => m.content)
+      .join('\n');
+
+    logger.info(`[LLM] calling Google ${model} (messages=${messages.length}, max_tokens=${max_tokens})`);
+    await log(`[LLM] Google fallback: model=${model}`);
+
+    const response = await client.models.generateContent({
+      model,
+      contents: userContent,
+      systemInstruction: systemMsg?.content,
+      config: {
+        temperature,
+        maxOutputTokens: max_tokens,
+      },
+    });
+
+    const text = response.text;
+    if (!text) throw new Error('Empty response from Google GenAI');
+
+    logger.info(`[LLM] Google ${model} success (${text.length} chars)`);
+    await log(`[LLM] Google fallback success`);
+    return text;
   }
 
   async chat(
