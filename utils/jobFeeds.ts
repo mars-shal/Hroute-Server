@@ -16,6 +16,7 @@ import type { DatabaseLike } from "../model/database.js";
 import { EmbeddingService } from "../utils/embedding.js";
 import { normalizeJobCleanupInput } from "../utils/jobCleanup.js";
 import { processJobPipeline } from "../utils/jobPipeline.js";
+import { processJobRow } from "../utils/jobEnrichmentPipeline.js";
 import { logger, log } from "../utils/logger.js";
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -490,13 +491,40 @@ export async function discoverFromFeeds(
 
           const experienceLevel = classifyExperienceLevel(raw.title, normalized.description);
 
+          const enrichmentResult = await processJobRow(
+            {
+              title: raw.title,
+              company: raw.company || "Unknown",
+              location: raw.location ?? null,
+              description: raw.description || raw.title,
+              skills: raw.skills,
+              salary_range: raw.salary_range,
+              remote_status: normalized.remoteStatus,
+              apply_url: normalized.applyUrl,
+              posted_date: raw.posted_date,
+              source_site: source.sourceSite,
+              source_url: raw.source_url,
+              logo_url: raw.logo_url,
+              experience_level: experienceLevel,
+            },
+            { runEnrichment: false },
+          );
+
+          const cleanedDesc = enrichmentResult.description.data?.clean ?? normalized.description;
+          const qualityScore = enrichmentResult.description.data?.qualityScore ?? null;
+          const parsedSalary = enrichmentResult.salary.data;
+
+          if (qualityScore !== null && qualityScore < 50) {
+            logger.info(`[FeedDiscover] Low quality (${qualityScore}p): ${raw.title} @ ${raw.company}`);
+          }
+
           const pipelineResult = processJobPipeline(
             {
               title: raw.title,
               company: raw.company || "Unknown",
               location: raw.location ?? null,
-              description: normalized.description,
-              skills: normalized.skills,
+              description: cleanedDesc,
+              skills: enrichmentResult.enriched?.skills ?? normalized.skills,
               remote_status: normalized.remoteStatus,
               salary_range: raw.salary_range,
               apply_url: normalized.applyUrl,
@@ -512,8 +540,8 @@ export async function discoverFromFeeds(
             title: raw.title,
             company: raw.company || "Unknown",
             location: raw.location ?? null,
-            description: normalized.description,
-            skills: normalized.skills,
+            description: cleanedDesc,
+            skills: enrichmentResult.enriched?.skills ?? normalized.skills,
             remote_status: pipelineResult.remote_status_normalized,
             salary_range: raw.salary_range,
             apply_url: normalized.applyUrl,
@@ -521,7 +549,7 @@ export async function discoverFromFeeds(
             source_site: source.sourceSite,
             source_url: raw.source_url,
             logo_url: raw.logo_url,
-            experience_level: experienceLevel,
+            experience_level: enrichmentResult.enriched?.experience_level ?? experienceLevel,
             crawled_at: new Date().toISOString(),
           });
 
@@ -529,8 +557,8 @@ export async function discoverFromFeeds(
           const jobId = Array.isArray(storedJob) ? storedJob[0]?.id : storedJob?.id;
 
           if (jobId) {
-            if (normalized.description.length > 20) {
-              const vector = await embeddingService.embed(normalized.description);
+            if (cleanedDesc.length > 20) {
+              const vector = await embeddingService.embed(cleanedDesc);
               await db.storeJobVector(jobId, vector);
             }
             totalJobs++;

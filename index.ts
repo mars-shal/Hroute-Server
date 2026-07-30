@@ -2,7 +2,7 @@ import { connectDatabase } from "./model/database.js";
 import { createApp, createHttpServer } from "./app.js";
 import { log, logger } from "./utils/logger.js";
 
-const port = parseInt(process.env.PORT || "8082", 10);
+const port = parseInt(process.env.PORT || "8882", 10);
 
 let dbPromise: ReturnType<typeof connectDatabase> | null = null;
 

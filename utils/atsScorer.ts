@@ -47,36 +47,36 @@ const REQUIRED_SECTIONS = [
 
 const STANDARD_SECTION_PATTERNS: Record<string, RegExp[]> = {
   summary: [
-    /^#\s+(professional\s+)?summary/i,
-    /^#\s+(career\s+)?objective/i,
-    /^#\s+profile/i,
+    /^#\s+(professional\s+)?summary/im,
+    /^#\s+(career\s+)?objective/im,
+    /^#\s+profile/im,
   ],
   skills: [
-    /^#\s+(technical\s+)?skills?/i,
-    /^#\s+core\s+competencies/i,
-    /^#\s+technologies/i,
-    /^#\s+technical\s+proficiencies/i,
+    /^#\s+(technical\s+)?skills?/im,
+    /^#\s+core\s+competencies/im,
+    /^#\s+technologies/im,
+    /^#\s+technical\s+proficiencies/im,
   ],
   experience: [
-    /^#\s+(work\s+)?experience/i,
-    /^#\s+professional\s+experience/i,
-    /^#\s+employment\s+history/i,
-    /^#\s+career\s+history/i,
+    /^#\s+(work\s+)?experience/im,
+    /^#\s+professional\s+experience/im,
+    /^#\s+employment\s+history/im,
+    /^#\s+career\s+history/im,
   ],
   education: [
-    /^#\s+education/i,
-    /^#\s+academic\s+background/i,
-    /^#\s+degrees/i,
+    /^#\s+education/im,
+    /^#\s+academic\s+background/im,
+    /^#\s+degrees/im,
   ],
   projects: [
-    /^#\s+projects?/i,
-    /^#\s+portfolio/i,
-    /^#\s+key\s+projects/i,
+    /^#\s+projects?/im,
+    /^#\s+portfolio/im,
+    /^#\s+key\s+projects/im,
   ],
   certifications: [
-    /^#\s+certifications?/i,
-    /^#\s+licenses?/i,
-    /^#\s+credentials/i,
+    /^#\s+certifications?/im,
+    /^#\s+licenses?/im,
+    /^#\s+credentials/im,
   ],
 };
 

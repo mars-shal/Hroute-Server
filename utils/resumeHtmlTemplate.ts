@@ -82,6 +82,19 @@ function generateResumeHtml(
   return wrapInHtmlDocument(sections.join('\n'), opts);
 }
 
+// ── Entry Header Helper ─────────────────────────────────────
+
+function generateEntryHeader(title: string, subtitle?: string, dates?: string): string {
+  return `
+      <div class="entry-header">
+        <div class="entry-title-row">
+          <span class="entry-title">${escapeHtml(title)}</span>
+          ${dates ? `<span class="entry-dates">${escapeHtml(dates)}</span>` : ''}
+        </div>
+        ${subtitle ? `<div class="entry-subtitle">${escapeHtml(subtitle)}</div>` : ''}
+      </div>`;
+}
+
 // ── Section Generators ─────────────────────────────────────────
 
 function generateHeader(
@@ -100,7 +113,7 @@ function generateHeader(
   return `
     <header class="header">
       <h1 class="name">${escapeHtml(session.full_name)}</h1>
-      <div class="contact">${contactParts.join(' • ')}</div>
+      <div class="contact">${contactParts.join(' | ')}</div>
     </header>
   `;
 }
@@ -110,7 +123,7 @@ function generateSummary(summary: string, options: TemplateOptions): string {
     <section class="section">
       <h2 class="section-title">Summary</h2>
       <div class="content">
-        ${formatMarkdownToHtml(summary)}
+        ${formatMarkdownToHtml(escapeHtml(summary))}
       </div>
     </section>
   `;
@@ -119,16 +132,13 @@ function generateSummary(summary: string, options: TemplateOptions): string {
 function generateSkills(skills: SkillCategory[], options: TemplateOptions): string {
   const categoriesHtml = skills.map(category => `
     <div class="skill-category">
-      <h3 class="skill-category-title">${escapeHtml(category.name)}</h3>
-      <ul class="skill-list">
-        ${category.skills.map(skill => `<li>${escapeHtml(skill)}</li>`).join('\n')}
-      </ul>
+      <p class="skill-line"><strong class="skill-category-title">${escapeHtml(category.name)}:</strong> ${category.skills.map(skill => escapeHtml(skill)).join(', ')}</p>
     </div>
   `).join('\n');
 
   return `
     <section class="section">
-      <h2 class="section-title">Technical Skills</h2>
+      <h2 class="section-title">Skills</h2>
       <div class="content">
         ${categoriesHtml}
       </div>
@@ -137,18 +147,16 @@ function generateSkills(skills: SkillCategory[], options: TemplateOptions): stri
 }
 
 function generateExperience(experience: ExperienceEntry[], options: TemplateOptions): string {
-  const entriesHtml = experience.map(exp => `
+  const entriesHtml = experience.map(exp => {
+    const dates = exp.start_date && exp.end_date ? `${exp.start_date} – ${exp.end_date}` : undefined;
+    return `
     <div class="experience-entry">
-      <div class="entry-header">
-        <div class="entry-company">${escapeHtml(exp.company)}</div>
-        <div class="entry-role">${escapeHtml(exp.role)}</div>
-        <div class="entry-dates">${escapeHtml(exp.start_date)} – ${escapeHtml(exp.end_date)}</div>
-      </div>
+      ${generateEntryHeader(exp.company, exp.role, dates)}
       <ul class="bullet-list">
         ${exp.bullets.map(bullet => `<li>${escapeHtml(bullet)}</li>`).join('\n')}
       </ul>
-    </div>
-  `).join('\n');
+    </div>`;
+  }).join('\n');
 
   return `
     <section class="section">
@@ -163,9 +171,7 @@ function generateExperience(experience: ExperienceEntry[], options: TemplateOpti
 function generateProjects(projects: ProjectEntry[], options: TemplateOptions): string {
   const entriesHtml = projects.map(project => `
     <div class="project-entry">
-      <div class="entry-header">
-        <div class="entry-company">${escapeHtml(project.name)}</div>
-      </div>
+      ${generateEntryHeader(project.name)}
       <ul class="bullet-list">
         ${project.description.map(desc => `<li>${escapeHtml(desc)}</li>`).join('\n')}
         ${project.technologies.length > 0 ? `<li class="technologies">Technologies: ${project.technologies.map(t => escapeHtml(t)).join(', ')}</li>` : ''}
@@ -186,11 +192,7 @@ function generateProjects(projects: ProjectEntry[], options: TemplateOptions): s
 function generateEducation(education: EducationEntry[], options: TemplateOptions): string {
   const entriesHtml = education.map(edu => `
     <div class="education-entry">
-      <div class="entry-header">
-        <div class="entry-company">${escapeHtml(edu.institution)}</div>
-        <div class="entry-dates">${escapeHtml(edu.year)}</div>
-      </div>
-      <div class="entry-degree">${escapeHtml(edu.degree)}</div>
+      ${generateEntryHeader(edu.institution, edu.degree, edu.year)}
     </div>
   `).join('\n');
 
@@ -223,183 +225,161 @@ function generateCertifications(certifications: CertificationEntry[], options: T
 
 // ── HTML Document Wrapper ──────────────────────────────────────
 
-function wrapInHtmlDocument(content: string, options: TemplateOptions): string {
-  return `
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Resume</title>
-  <style>
-    /* Reset and base styles */
-    * {
-      margin: 0;
-      padding: 0;
-      box-sizing: border-box;
-    }
+	function wrapInHtmlDocument(content: string, options: TemplateOptions): string {
+	  return `
+	<!DOCTYPE html>
+	<html lang="en">
+	<head>
+	  <meta charset="UTF-8">
+	  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+	  <title>Resume</title>
+	  <style>
+	    @page {
+	      size: A4;
+	      margin: 20mm 15mm;
+	    }
 
-    body {
-      font-family: ${options.fontFamily};
-      font-size: ${options.fontSize};
-      line-height: 1.5;
-      color: ${options.primaryColor};
-      padding: 40px;
-      max-width: 800px;
-      margin: 0 auto;
-    }
+	    :root {
+	      --color-primary: ${options.primaryColor};
+	      --color-text: #333;
+	      --color-muted: #555;
+	      --color-faint: #777;
+	      --color-border: #ccc;
+	      --font-display: Calibri, 'Segoe UI', Arial, Helvetica, sans-serif;
+	      --font-body: Arial, Helvetica, sans-serif;
+	      --space-1: 4px;
+	      --space-2: 8px;
+	      --space-3: 12px;
+	      --space-4: 16px;
+	      --space-5: 24px;
+	      --space-6: 32px;
+	      --scale-1: 10pt;
+	      --scale-2: 11pt;
+	      --scale-3: 13.75pt;
+	      --scale-4: 17.5pt;
+	      --scale-5: 22pt;
+	      ${options.showBorder ? '--border-width: 1px;' : '--border-width: 0;'}
+	    }
 
-    /* Header styles */
-    .header {
-      text-align: center;
-      margin-bottom: 24px;
-      padding-bottom: 16px;
-      border-bottom: 1px solid #e0e0e0;
-    }
+	    * { margin: 0; padding: 0; box-sizing: border-box; }
 
-    .name {
-      font-size: 24pt;
-      font-weight: bold;
-      margin-bottom: 8px;
-      color: #1a1a1a;
-    }
+	    body {
+	      font-family: var(--font-body);
+	      font-size: var(--scale-2);
+	      line-height: 1.5;
+	      color: var(--color-text);
+	      padding: var(--space-5) var(--space-6);
+	      max-width: 800px;
+	      margin: 0 auto;
+	    }
 
-    .contact {
-      font-size: 10pt;
-      color: #444;
-    }
+	    .header {
+	      margin-bottom: var(--space-5);
+	      padding-bottom: var(--space-4);
+	      border-bottom: var(--border-width, 1px) solid var(--color-border);
+	    }
 
-    .contact a {
-      color: #444;
-      text-decoration: none;
-    }
+	    .name {
+	      font-family: var(--font-display);
+	      font-size: var(--scale-5);
+	      font-weight: 700;
+	      color: var(--color-primary);
+	      margin-bottom: var(--space-1);
+	      letter-spacing: -0.02em;
+	    }
 
-    .contact a:hover {
-      text-decoration: underline;
-    }
+	    .contact {
+	      font-size: var(--scale-1);
+	      color: var(--color-muted);
+	    }
 
-    /* Section styles */
-    .section {
-      margin-bottom: 20px;
-    }
+	    .contact a { color: var(--color-muted); text-decoration: none; }
+	    .contact a:hover { text-decoration: underline; }
 
-    .section-title {
-      font-size: 14pt;
-      font-weight: bold;
-      color: #1a1a1a;
-      margin-bottom: 8px;
-      padding-bottom: 4px;
-      border-bottom: 1px solid #e0e0e0;
-    }
+	    .section {
+	      margin-bottom: var(--space-5);
+	    }
 
-    .content {
-      margin-left: 0;
-    }
+	    .section-title {
+	      font-family: var(--font-display);
+	      font-size: var(--scale-3);
+	      font-weight: 600;
+	      color: var(--color-primary);
+	      margin-bottom: var(--space-3);
+	      padding-bottom: var(--space-1);
+	      border-bottom: var(--border-width, 1px) solid var(--color-border);
+	      text-transform: uppercase;
+	      letter-spacing: 0.08em;
+	    }
 
-    /* Skills styles */
-    .skill-category {
-      margin-bottom: 8px;
-    }
+	    .content { margin-left: 0; }
 
-    .skill-category-title {
-      font-size: 11pt;
-      font-weight: bold;
-      margin-bottom: 4px;
-    }
+	    .skill-category { margin-bottom: var(--space-1); }
+	    .skill-line {
+	      font-size: var(--scale-2);
+	      line-height: 1.6;
+	      margin: 0;
+	    }
+	    .skill-category-title {
+	      font-family: var(--font-display);
+	      font-weight: 600;
+	      color: var(--color-primary);
+	    }
 
-    .skill-list {
-      list-style: disc;
-      margin-left: 20px;
-    }
+	    .experience-entry,
+	    .project-entry,
+	    .education-entry {
+	      margin-bottom: var(--space-4);
+	      page-break-inside: avoid;
+	    }
 
-    .skill-list li {
-      margin-bottom: 2px;
-    }
+	    .entry-header { margin-bottom: var(--space-1); }
+	    .entry-title-row {
+	      display: flex;
+	      justify-content: space-between;
+	      align-items: baseline;
+	    }
+	    .entry-title {
+	      font-family: var(--font-display);
+	      font-size: var(--scale-2);
+	      font-weight: 700;
+	      color: var(--color-primary);
+	    }
+	    .entry-subtitle {
+	      font-size: var(--scale-2);
+	      color: var(--color-muted);
+	      margin-top: 2px;
+	    }
+	    .entry-dates {
+	      font-size: var(--scale-1);
+	      color: var(--color-faint);
+	      white-space: nowrap;
+	    }
 
-    /* Experience styles */
-    .experience-entry,
-    .project-entry,
-    .education-entry {
-      margin-bottom: 16px;
-    }
+	    .bullet-list { list-style: disc; margin-left: 20px; }
+	    .bullet-list li { margin-bottom: var(--space-1); }
+	    .technologies { font-style: italic; color: var(--color-faint); }
 
-    .entry-header {
-      margin-bottom: 4px;
-    }
+	    .certification-list { list-style: disc; margin-left: 20px; }
+	    .certification-list li { margin-bottom: var(--space-1); }
 
-    .entry-company {
-      font-weight: bold;
-      font-size: 11pt;
-    }
-
-    .entry-role {
-      font-style: italic;
-      color: #444;
-    }
-
-    .entry-dates {
-      font-size: 10pt;
-      color: #666;
-    }
-
-    .entry-degree {
-      font-style: italic;
-    }
-
-    /* Bullet list styles */
-    .bullet-list {
-      list-style: disc;
-      margin-left: 20px;
-    }
-
-    .bullet-list li {
-      margin-bottom: 4px;
-    }
-
-    .technologies {
-      font-style: italic;
-      color: #666;
-    }
-
-    /* Certification list styles */
-    .certification-list {
-      list-style: disc;
-      margin-left: 20px;
-    }
-
-    .certification-list li {
-      margin-bottom: 4px;
-    }
-
-    /* Print styles */
-    @media print {
-      body {
-        padding: 0;
-        max-width: none;
-      }
-
-      .section {
-        page-break-inside: avoid;
-      }
-    }
-  </style>
-</head>
-<body>
-  ${content}
-</body>
-</html>
-  `;
-}
+	    @media print {
+	      body { padding: 0; max-width: none; }
+	    }
+	  </style>
+	</head>
+	<body>
+	  ${content}
+	</body>
+	</html>
+	  `;
+	}
 
 // ── Helper Functions ───────────────────────────────────────────
 
 function escapeHtml(text: string): string {
-  return text
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#039;');
+  const map: Record<string, string> = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' };
+  return text.replace(/[&<>"']/g, c => map[c]);
 }
 
 function formatMarkdownToHtml(markdown: string): string {

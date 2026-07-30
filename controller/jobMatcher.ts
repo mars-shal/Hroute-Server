@@ -207,9 +207,11 @@ class JobMatcher {
     const recencyScore = this.recencyScore(job.crawled_at ?? job.posted_date);
     const salaryScore = this.salaryScore(job.salary_range, filters.salary_target ?? profile.salary_target);
     const seniorityScore = this.seniorityScore(job, profile);
+    const atsScore = this.atsScore(job, profile);
     const missingRequiredPenalty = Math.min(0.4, missingSkills.length * 0.05);
     const rawScore =
-      similarity * 0.8 +
+      similarity * 0.5 +
+      atsScore * 0.3 +
       skillScore * 0.2 +
       locationScore * 0.06 +
       workStyleScore * 0.05 +
@@ -225,7 +227,7 @@ class JobMatcher {
       similarity,
       matched_skills: matchedSkills,
       missing_skills: missingSkills,
-      rank_reasons: this.rankReasons(matchedSkills, locationScore, workStyleScore, recencyScore, salaryScore, seniorityScore),
+      rank_reasons: this.rankReasons(matchedSkills, locationScore, workStyleScore, recencyScore, salaryScore, seniorityScore, atsScore),
     };
   }
 
@@ -263,6 +265,83 @@ class JobMatcher {
     return jobText && targetText && jobText.includes(targetText) ? 1 : 0.5;
   }
 
+  private atsScore(job: Record<string, unknown>, profile: Record<string, unknown>): number {
+    // Build resume term profile (shared — first call computes, cached for the match cycle)
+    const resumeText = String(profile.resume_text ?? "").toLowerCase();
+    const userSkills = this.stringList(profile.skills);
+    const userRole = String(profile.role ?? "").toLowerCase();
+
+    // Short resumes (post-upload but no resume_text) → neutral
+    if (resumeText.length < 50 && userSkills.length === 0) return 0.5;
+
+    const stopWords = new Set([
+      "the","and","for","are","but","not","you","all","can","had","her","was","one",
+      "our","out","has","have","been","with","that","this","from","they","will","your",
+      "which","their","than","what","when","were","also","its","just","about","would",
+      "could","should","after","into","over","such","only","other","than","then","these",
+      "those","very","because","more","some","well","how","who","where","each","them",
+      "into","then","many","most","another","both","through","during","before","between",
+      "under","after","above","below","much","may","still","while","however","whether",
+      "although","therefore","thus","nearly","enough","ever","every","own","rather",
+      "quite","around","long","here","there","been","being","having","doing","does",
+      "did","done","getting","going","gone","make","take","year","years","new","first",
+      "last","also","well","back","even","still","way","many","much","like","including",
+      "using","based","various","within","without","across","along","among","upon",
+      "down","off","per","via","until","since","up","on","in","at","to","a","an","is",
+      "was","be","by","or","as","of","it","no","so","if","do","go","get","know","see",
+      "use","may","let","said","part","set","end","put","run","say","help","show"
+    ]);
+
+    // Collect resume terms: skills + role words + high-frequency resume words
+    const resumeTerms = new Set<string>();
+
+    // Skills are the highest-value terms
+    for (const skill of userSkills) {
+      resumeTerms.add(skill);
+    }
+
+    // Role words
+    if (userRole) {
+      for (const w of userRole.split(/\s+/)) {
+        if (w.length > 2 && !stopWords.has(w)) resumeTerms.add(w);
+      }
+    }
+
+    // Frequent terms from resume text (top 50 by frequency, min length 4)
+    const words = resumeText.split(/\W+/).filter(w => w.length >= 4 && !stopWords.has(w));
+    const freq = new Map<string, number>();
+    for (const w of words) freq.set(w, (freq.get(w) || 0) + 1);
+    for (const [term] of [...freq.entries()].sort((a, b) => b[1] - a[1]).slice(0, 50)) {
+      resumeTerms.add(term);
+    }
+
+    if (resumeTerms.size === 0) return 0.5;
+
+    // Score job: term frequency in title (3×) + description (1×), capped per term
+    const title = String(job.title ?? "").toLowerCase();
+    const description = String(job.description ?? "").toLowerCase();
+    const jobSkills = this.stringList(job.skills);
+
+    let score = 0;
+    let maxPossible = 0;
+
+    for (const term of resumeTerms) {
+      if (term.length < 2) continue;
+      const escaped = term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const pattern = new RegExp(escaped, "g");
+      const logFreq = Math.log((freq.get(term) || 1) + 1);
+      const titleHit = title.includes(term) ? 1 : 0;
+      const descHits = description ? Math.min((description.match(pattern) || []).length, 3) : 0;
+      // Skill-in-skills bonus: if this resume term is a known skill and the job lists it
+      const skillBonus = userSkills.includes(term) && jobSkills.includes(term) ? 1 : 0;
+      score += (titleHit * 3 + descHits + skillBonus) * logFreq;
+      maxPossible += (3 + 3 + 1) * logFreq; // max per term: 1 title(×3) + 3 desc + 1 skill bonus
+    }
+
+    const ats = maxPossible > 0 ? Math.min(score / maxPossible, 1) : 0.5;
+    return Math.round(ats * 100) / 100; // round to 2 decimals
+  }
+
   private seniorityScore(job: Record<string, unknown>, profile: Record<string, unknown>): number {
     // Prefer stored experience_level if available
     const storedLevel = String(job.experience_level ?? "").toLowerCase();
@@ -279,7 +358,7 @@ class JobMatcher {
     return this.clamp(score / 15); // normalize [-10,+10] → [-0.66,+0.66]
   }
 
-  private rankReasons(skills: string[], location: number, workStyle: number, recency: number, salary: number, seniority: number): string[] {
+  private rankReasons(skills: string[], location: number, workStyle: number, recency: number, salary: number, seniority: number, ats: number): string[] {
     const reasons: string[] = [];
     if (skills.length > 0) reasons.push("skill match");
     if (location >= 0.7) reasons.push("location match");
@@ -287,6 +366,8 @@ class JobMatcher {
     if (recency >= 0.7) reasons.push("recent posting");
     if (salary >= 1) reasons.push("salary match");
     if (seniority >= 0.15) reasons.push("entry-level friendly");
+    if (ats >= 0.6) reasons.push("strong ATS match");
+    else if (ats >= 0.4) reasons.push("good ATS match");
     return reasons;
   }
 

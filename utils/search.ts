@@ -27,6 +27,7 @@ export const SEARCHURLS = [
   "https://workingnomads.com",
   "https://justremote.co",
   "https://jobspresso.co",
+  "https://www.micro1.ai",
 
   // ═══════════════════════════════════════════════════════════════════
   // BUCKET 3 — African Entry-Level Boards (high priority)

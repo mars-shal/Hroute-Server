@@ -8,6 +8,7 @@ import { log, logger } from "../utils/logger.js";
 import { SEARCHURLS, isFeedSource } from "../utils/search.js";
 import { normalizeJobCleanupInput } from "../utils/jobCleanup.js";
 import { isJunkPage, isLikelyMarketingPage, processJobPipeline } from "../utils/jobPipeline.js";
+import { processJobRow } from "../utils/jobEnrichmentPipeline.js";
 import { classifyExperienceLevel, processFeedsInBatches } from "../utils/jobFeeds.js";
 
 /** Strip carriage returns, tabs, zero-width characters from a URL string */
@@ -97,13 +98,39 @@ class JobApplicationController {
 
                 const experienceLevel = classifyExperienceLevel(feedJob.title, normalized.description);
 
+                const enrichmentResult = await processJobRow(
+                  {
+                    title: feedJob.title,
+                    company: feedJob.company,
+                    location: feedJob.location ?? null,
+                    description: feedJob.description,
+                    skills: feedJob.skills,
+                    salary_range: feedJob.salary_range,
+                    remote_status: normalized.remoteStatus,
+                    apply_url: normalized.applyUrl,
+                    posted_date: feedJob.posted_date,
+                    source_site: feedJob.source_site,
+                    source_url: feedJob.source_url,
+                    logo_url: feedJob.logo_url,
+                    experience_level: experienceLevel,
+                  },
+                  { runEnrichment: false },
+                );
+
+                const cleanedDesc = enrichmentResult.description.data?.clean ?? normalized.description;
+                const qualityScore = enrichmentResult.description.data?.qualityScore ?? null;
+
+                if (qualityScore !== null && qualityScore < 50) {
+                  logger.info(`[Discover] Low quality (${qualityScore}p): ${feedJob.title} @ ${feedJob.company}`);
+                }
+
                 const pipelineResult = processJobPipeline(
                   {
                     title: feedJob.title,
                     company: feedJob.company,
                     location: feedJob.location,
-                    description: normalized.description,
-                    skills: normalized.skills,
+                    description: cleanedDesc,
+                    skills: enrichmentResult.enriched?.skills ?? normalized.skills,
                     remote_status: normalized.remoteStatus,
                     salary_range: feedJob.salary_range,
                     apply_url: normalized.applyUrl,
@@ -119,8 +146,8 @@ class JobApplicationController {
                   title: feedJob.title,
                   company: feedJob.company,
                   location: feedJob.location,
-                  description: normalized.description,
-                  skills: normalized.skills,
+                  description: cleanedDesc,
+                  skills: enrichmentResult.enriched?.skills ?? normalized.skills,
                   remote_status: pipelineResult.remote_status_normalized,
                   salary_range: feedJob.salary_range,
                   apply_url: normalized.applyUrl,
@@ -128,7 +155,7 @@ class JobApplicationController {
                   source_site: feedJob.source_site,
                   source_url: feedJob.source_url,
                   logo_url: feedJob.logo_url,
-                  experience_level: experienceLevel,
+                  experience_level: enrichmentResult.enriched?.experience_level ?? experienceLevel,
                   crawled_at: new Date().toISOString(),
                 });
 
@@ -141,8 +168,8 @@ class JobApplicationController {
                     ? storedJob[0]?.id
                     : (storedJob as { id: string } | undefined)?.id;
 
-                if (jobId && normalized.description.length > 20) {
-                  const vector = await embeddingService.embed(normalized.description);
+                if (jobId && cleanedDesc.length > 20) {
+                  const vector = await embeddingService.embed(cleanedDesc);
                   await this.db.storeJobVector(jobId, vector);
                   await this.matcher.bumpJobsIndexVersion();
                 }
@@ -232,20 +259,50 @@ class JobApplicationController {
                   continue;
                 }
 
+                const rawDesc = typeof job.description === "string" && job.description.trim().length > 0
+                  ? job.description
+                  : markdown.slice(0, 4000);
+
+                const enrichmentResult = await processJobRow(
+                  {
+                    title: (job.title as string) ?? "",
+                    company: (job.company as string) ?? "",
+                    location: (job.location as string) ?? null,
+                    description: rawDesc,
+                    skills: (job.skills as string[]) ?? [],
+                    salary_range: (job.salary_range as string) ?? null,
+                    remote_status: normalized.remoteStatus,
+                    apply_url: normalized.applyUrl,
+                    posted_date: (job.posted_date as string) ?? null,
+                    source_site: (job.source_site as string) ?? seedUrl,
+                    source_url: pageUrl,
+                    logo_url: (job.logo_url as string) ?? null,
+                    experience_level: (job.experience_level as string) ?? null,
+                  },
+                  { runEnrichment: false },
+                );
+
+                const cleanedDesc = enrichmentResult.description.data?.clean ?? normalized.description;
+                const qualityScore = enrichmentResult.description.data?.qualityScore ?? null;
+
+                if (qualityScore !== null && qualityScore < 50) {
+                  logger.info(`[Discover] Low quality (${qualityScore}p): ${job.title}`);
+                }
+
                 const pipelineResult = processJobPipeline(
                   {
-                    title: job.title,
-                    company: job.company,
-                    location: job.location ?? null,
-                    description: normalized.description,
-                    skills: normalized.skills,
+                    title: (job.title as string) ?? "",
+                    company: (job.company as string) ?? "",
+                    location: (job.location as string) ?? null,
+                    description: cleanedDesc,
+                    skills: enrichmentResult.enriched?.skills as string[] ?? normalized.skills,
                     remote_status: normalized.remoteStatus,
-                    salary_range: job.salary_range ?? null,
+                    salary_range: (job.salary_range as string) ?? null,
                     apply_url: normalized.applyUrl,
-                    posted_date: job.posted_date ?? null,
-                    source_site: job.source_site ?? seedUrl,
+                    posted_date: (job.posted_date as string) ?? null,
+                    source_site: (job.source_site as string) ?? seedUrl,
                     source_url: pageUrl,
-                    logo_url: job.logo_url ?? null,
+                    logo_url: (job.logo_url as string) ?? null,
                   },
                   pageUrl,
                 );
@@ -260,23 +317,23 @@ class JobApplicationController {
 
                 const crawlerExperienceLevel = (job.experience_level as string) ?? classifyExperienceLevel(
                   (job.title as string) ?? "",
-                  normalized.description,
+                  cleanedDesc,
                 );
 
                 const storeRes = await this.db.storeJob({
-                  title: job.title,
-                  company: job.company,
-                  location: job.location ?? null,
-                  description: normalized.description,
-                  skills: normalized.skills,
+                  title: (job.title as string) ?? "",
+                  company: (job.company as string) ?? "",
+                  location: (job.location as string) ?? null,
+                  description: cleanedDesc,
+                  skills: enrichmentResult.enriched?.skills as string[] ?? normalized.skills,
                   remote_status: pipelineResult.remote_status_normalized,
-                  salary_range: job.salary_range ?? null,
+                  salary_range: (job.salary_range as string) ?? null,
                   apply_url: normalized.applyUrl,
-                  posted_date: pipelineResult.posted_date_parsed ?? job.posted_date ?? null,
-                  source_site: job.source_site ?? seedUrl,
+                  posted_date: pipelineResult.posted_date_parsed ?? (job.posted_date as string) ?? null,
+                  source_site: (job.source_site as string) ?? seedUrl,
                   source_url: pageUrl,
-                  logo_url: job.logo_url ?? null,
-                  experience_level: crawlerExperienceLevel,
+                  logo_url: (job.logo_url as string) ?? null,
+                  experience_level: enrichmentResult.enriched?.experience_level as string ?? crawlerExperienceLevel,
                   crawled_at: new Date().toISOString(),
                 });
 
@@ -290,8 +347,8 @@ class JobApplicationController {
                     : (storedJob as { id: string } | undefined)?.id;
 
                 if (jobId) {
-                  if (normalized.description.length > 20) {
-                    const vector = await embeddingService.embed(normalized.description);
+                  if (cleanedDesc.length > 20) {
+                    const vector = await embeddingService.embed(cleanedDesc);
                     await this.db.storeJobVector(jobId, vector);
                     await this.matcher.bumpJobsIndexVersion();
                   }

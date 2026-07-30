@@ -85,6 +85,27 @@ interface ChatResponse {
   is_complete: boolean;
 }
 
+/** Structured interview state — tracks what evidence has been extracted per entry */
+interface CVState {
+  experience_completeness: Record<number, ExperienceCompleteness>;
+  skills_asked: boolean;
+  education_depth: 'none' | 'basic' | 'detailed';
+  summary_quality: 'none' | 'basic' | 'good' | 'strong';
+  contacted: boolean;
+  what_else_offered: boolean;
+}
+
+interface ExperienceCompleteness {
+  has_role: boolean;
+  has_company: boolean;
+  has_dates: boolean;
+  has_bullets: boolean;
+  has_impact: boolean;
+  has_technologies: boolean;
+  has_projects: boolean;
+  depth: 'none' | 'basic' | 'detailed' | 'deep';
+}
+
 // ── Constants ──────────────────────────────────────────────────
 
 const SESSION_PREFIX = 'resume:session:';
@@ -109,32 +130,82 @@ const OPTIONAL_FIELDS = [
   'certifications',
 ] as const;
 
-const CV_COACH_SYSTEM_PROMPT = `You are the CV Coach inside Hroute — a warm, sharp assistant helping job seekers turn their CV into something that actually lands interviews.
+const CV_COACH_SYSTEM_PROMPT = `You are Hroute's CV Interviewer — a sharp, warm assistant whose job is to extract strong, evidence-based CV content from the user.
 
-CONVERSATIONAL STYLE
-- Warm and encouraging by default, but grounded — never flattery for its own sake. If something is weak, say so plainly and explain why, then help fix it. Honesty is part of being genuinely helpful here, not a departure from warmth.
-- Talk like a sharp, friendly person who's good at this — not a hype-man, not a corporate bot. Skip forced slang ("yaaas", "fire") as a personality crutch. Let the attentiveness and specificity of your questions/feedback carry the warmth instead.
-- Short messages — mobile chat, one question or one point at a time. No stacked questions in a single turn.
-- Acknowledge what the user just said before moving on, but briefly and specifically ("That's a strong metric to lead with" beats "Nice!" or "Got it!"). Specific acknowledgment > generic enthusiasm.
-- Vary your phrasing — don't reuse the same opener or closer every turn. Repetition reads as scripted, which undercuts trust.
-- When giving feedback on something they wrote, be concrete: name the exact phrase that's vague, suggest what to replace it with, explain in one clause why the change helps (recruiters scan for numbers, action verbs, outcomes — not duties).
+YOUR PURPOSE IS NOT TO COMPLETE A FORM.
+Your purpose is to discover evidence that makes the user's CV stronger.
 
-CONSTRAINTS
-- Never invent details about the user's experience — only use what they've told you.
-- Don't ask for sensitive data beyond what a CV needs.
-- NEVER ask the same question twice. If you just asked about summary and they replied, that field is DONE — move on.
-- Experience entries need: company name, role, AND at least one detailed bullet (10+ chars). Just "1 year" won't count as complete — ask for specifics.
-- Education entries need: institution name AND degree/program. Just university name without a degree won't count as complete.
-- When the user gives vague/brief answers to experience or education questions, gently follow up for specifics (company name, what you actually did, title, degree name).
+CORE INTERVIEW STRATEGY
 
-CALIBRATION
-Confident and personable, like someone good at their job who's on your side — not performing enthusiasm, not reciting a script. The bar: would this response feel different if you swapped in a different user's name? If not, it's too generic — make it specific to what they actually told you.
+Every user message should either:
+1. Provide new CV information
+2. Clarify existing information
+3. Answer your previous question
+4. Ask for guidance ("what else?")
+5. Change the topic
+6. Indicate they want to stop
 
-OUTPUT FORMAT
-Always respond with valid JSON only — no markdown fences, no explanation outside the JSON. Return:
-- message: string (warm, specific — ask about ONLY the next single field)
-- updates: Partial<ResumeSession> (any fields to update — accept whatever they gave you)
-- missing_fields: string[] (full remaining list, for your tracking only)`;
+Extract useful information from EVERY response before deciding what to ask next.
+
+QUESTION PRIORITY (high to low):
+1. Achievements and outcomes — what changed because of their work
+2. Quantifiable impact — numbers, percentages, scale, users, revenue
+3. Projects they shipped — what they personally built
+4. Personal contribution — what THEY did, not the team
+5. Responsibilities — what they owned
+6. Technologies — how they used them
+7. Leadership and collaboration — what they led, team size
+8. Problems solved — specific challenges
+9. Dates and context
+10. Contact/administrative details
+
+Do NOT ask for lower-priority information when higher-priority information is still missing for an experience entry.
+
+CONVERSATION RULES:
+- Ask only ONE question at a time. No stacked questions.
+- Questions must be specific to what the user just said. Never generic.
+- Never repeat a question that's already been answered.
+- Do NOT use filler like "That's a good start" or "Great experience."
+- Do NOT unnecessarily restate what the user said — brief acknowledgment is fine.
+- Do NOT declare the CV complete — the application decides that.
+- If the user asks "what else?", explain what useful information is still missing based on what they've told you so far. Give them 2-3 concrete options.
+- If the user gives a vague answer, ask for a concrete example.
+- If the user mentions a project, investigate that project before changing topics.
+- If the user mentions an achievement, ask about its impact.
+- If the user mentions a technology, ask how they used it.
+- If the user mentions leadership, ask what they led and what the result was.
+
+DIGGING INTO EXPERIENCE — PROGRESSIVE QUESTION PATTERN:
+Level 1: "What did you personally build or do there?"
+Level 2: "What technologies did you use?"
+Level 3: "How many users/clients was it serving?"
+Level 4: "What changed after you shipped it?"
+
+Each level reveals a stronger CV bullet point.
+
+WHAT NOT TO DO:
+- Never follow a fixed question order
+- Never ask for phone number if they just told you about a project they shipped
+- Never ask about education if they just described a leadership achievement
+- Never say the resume is ready — that's the app's job
+- Never invent details about the user
+
+CALIBRATION:
+Talk like a recruiter who's good at interviewing candidates — attentive, specific, evidence-seeking. Not a form, not a hype-man. Short messages, one question, mobile-chat length. If something is weak, say so plainly and suggest a concrete fix.
+
+OUTPUT FORMAT — respond with valid JSON only (no markdown fences):
+{
+  "message": "string — your response to the user, ONE question at the end",
+  "updates": { /* Partial<ResumeSession> — any fields to update based on what the user just said */ },
+  "extracted_facts": {
+    "achievements": ["string"] | null,
+    "technologies": ["string"] | null,
+    "impact": "string" | null,
+    "projects": ["string"] | null,
+    "skills_mentioned": ["string"] | null
+  },
+  "next_focus": "experience" | "education" | "skills" | "projects" | "summary" | "contact" | "achievements" | "guidance"
+}`;
 
 // ── Main Controller ────────────────────────────────────────────
 
@@ -229,11 +300,11 @@ class ResumeBuilderController {
       throw new Error('Session not found');
     }
 
-    // Get current missing fields
-    const missingFields = this.getMissingFields(session);
+    // Compute structured interview state
+    const state = this.computeInterviewState(session);
 
-    // Build context for LLM
-    const context = this.buildChatContext(session, missingFields, message);
+    // Build context for LLM — no fixed field order, feed state
+    const context = this.buildChatContext(session, state, message);
 
     // Call LLM for response — use complete() directly, not reason(), to avoid
     // the "reasoning engine" system prompt overriding our casual tone instructions
@@ -283,15 +354,14 @@ class ResumeBuilderController {
       expiry: SESSION_EXPIRY,
     });
 
-    // Get updated missing fields
-    const updatedMissingFields = this.getMissingFields(updatedSession);
-    const isComplete = updatedMissingFields.length === 0;
+    // App-level completion: build is ready when we have sufficient data
+    const stateAfterSave = this.computeInterviewState(updatedSession);
+    const isComplete = this.isReadyToBuild(stateAfterSave, updatedSession);
 
     // Generate response message
     const responseMessage = this.generateResponseMessage(
       chatMessage,
       atsScore,
-      updatedMissingFields,
       isComplete
     );
 
@@ -299,7 +369,7 @@ class ResumeBuilderController {
       message: responseMessage,
       session: updatedSession,
       ats_score: atsScore,
-      missing_fields: updatedMissingFields,
+      missing_fields: this.getMissingFields(updatedSession),
       is_complete: isComplete,
     };
   }
@@ -437,17 +507,95 @@ class ResumeBuilderController {
     return missing;
   }
 
+  /**
+   * Compute structured interview state — tracks what evidence has
+   * been collected and how deep each entry's coverage is. Used by the
+   * app layer (not the LLM) for completion & context decisions.
+   */
+  private computeInterviewState(session: ResumeSession): CVState {
+    return {
+      experience_completeness: session.experience.map(e => ({
+        has_role: e.role.trim().length > 0,
+        has_company: e.company.trim().length > 0,
+        has_dates: e.start_date.trim().length > 0 || e.end_date.trim().length > 0,
+        has_bullets: e.bullets.some(b => b.trim().length > 10),
+        has_impact: e.bullets.some(b => /\d+|reduce|increase|grew|led|managed|built|created|designed|improved|delivered|launched|shipped|scaled|optimized/i.test(b)),
+        has_technologies: e.bullets.some(b => /[A-Z][a-z]+|[A-Z]{2,}/.test(b)),
+        has_projects: false,
+        depth: !e.bullets.length ? 'none' : e.bullets.length <= 2 ? 'basic' : e.bullets.length <= 4 ? 'detailed' : 'deep',
+      })),
+      skills_asked: session.skills.length > 0,
+      education_depth: !session.education.length ? 'none'
+        : session.education.some(e => e.institution.trim() && e.degree.trim()) ? 'detailed' : 'basic',
+      summary_quality: !session.summary ? 'none'
+        : session.summary.length < 50 ? 'basic'
+        : session.summary.length < 150 ? 'good' : 'strong',
+      contacted: session.email.trim().length > 0 && session.full_name.trim().length > 0,
+      what_else_offered: false,
+    };
+  }
+
+  /**
+   * App-level completion check. Returns true when we have sufficient
+   * data to build a reasonable resume — does NOT require every field
+   * to be filled perfectly.
+   */
+  private isReadyToBuild(state: CVState, session: ResumeSession): boolean {
+    // Must have contact info
+    if (!state.contacted) return false;
+
+    // Must have at least one experience with role + company + bullet
+    const hasGoodExperience = state.experience_completeness.some(
+      e => e.has_role && e.has_company && e.has_bullets
+    );
+    if (!hasGoodExperience) return false;
+
+    // Must have at least one skill
+    if (!state.skills_asked) return false;
+
+    // Must have basic education
+    if (state.education_depth === 'none') return false;
+
+    // Must have some summary
+    if (state.summary_quality === 'none') return false;
+
+    // If all basics are met AND one experience entry has deep coverage → ready
+    const hasDeepExperience = state.experience_completeness.some(e => e.depth === 'deep' || e.depth === 'detailed');
+    if (hasDeepExperience) return true;
+
+    // If ATS score is already decent (70+) → ready
+    if (session.ats_score && session.ats_score.score >= 70) return true;
+
+    // If at least 2 higher-priority things have quality → ready
+    const qualityCount = [
+      state.summary_quality === 'good' || state.summary_quality === 'strong',
+      hasGoodExperience,
+      state.experience_completeness.some(e => e.has_impact),
+      state.education_depth === 'detailed',
+    ].filter(Boolean).length;
+    return qualityCount >= 2;
+  }
+
   private buildChatContext(
     session: ResumeSession,
-    missingFields: string[],
+    state: CVState,
     userMessage: string
   ): string {
     const currentData = JSON.stringify(session, null, 2);
-    const nextField = missingFields[0] ?? null;
 
     const historyBlock = (session.chat_history ?? []).length > 0
       ? (session.chat_history ?? []).map(m => `${m.role}: ${m.content}`).join('\n')
       : '(no prior messages)';
+
+    const stateSummary = `Experience: ${session.experience.map((e, i) => {
+      const s = state.experience_completeness[i];
+      return s ? `[${i}] ${e.role || e.company || 'entry'} — role=${s.has_role}, company=${s.has_company}, bullets=${s.has_bullets}, impact=${s.has_impact}, depth=${s.depth}` : `[${i}] raw`;
+    }).join('; ') || 'none'}
+
+Skills: ${state.skills_asked ? `collected (${session.skills.length} categories)` : 'not yet discussed'}
+Education: ${state.education_depth}
+Summary: ${state.summary_quality}
+Contact: ${state.contacted ? 'complete' : 'incomplete'}`;
 
     return `Current session data:
 ${currentData}
@@ -457,31 +605,10 @@ ${historyBlock}
 
 User just said: ${userMessage}
 
-Missing fields (your internal tracking only — never show this list): ${missingFields.join(', ')}
+Coverage state (what's been collected so far):
+${stateSummary}
 
-RULES — follow strictly:
-1. Extract information the user just gave you and update session data.
-2. If the user provides ANY non-empty answer to the field you just asked about, accept it, put it in updates, and move to the next field. Do NOT re-ask. Do NOT judge quality. Weak answers lower the score — that's a scoring problem, not a re-ask problem.
-3. For experience: company name, role, and at least one detailed bullet (10+ chars) are required to count as complete. Just "1 year" or "software engineer" alone doesn't cut it.
-4. For education: institution name AND degree/program are both required. Just "Bells University" without a degree doesn't count as complete.
-5. For skills: at least one skill tag is needed.
-3. Acknowledge what they said briefly and specifically before asking the next question. "That's a strong metric to lead with" beats "Nice!".
-4. Ask for exactly ONE missing field per turn, in this priority order:
-   full_name → email → phone → location → summary → skills → experience → education
-5. Never list multiple missing fields. Never mention the score, a numeric grade, or a letter grade inside message.
-6. Keep message short — 1-2 sentences, one question. Mobile chat style.
-7. NO corporate speak. No "please provide", no "this information is crucial", no "ATS", no "as measured by".
-8. If all fields are complete, let them know their resume is ready and what the score looks like.
-9. If the calculated score is 88 or higher (even if not all fields are complete), suggest building the resume — it's already strong enough.
-10. NEVER ask the same question twice in a row. If you just asked about summary and they replied, that field is DONE — move on.
-11. If something they wrote is weak, say so plainly and suggest a concrete fix — name the exact phrase, suggest a replacement, explain why the change helps.
-
-The next field to ask about is: ${nextField ?? 'NONE — all fields filled'}
-
-Return JSON:
-- message: string (warm, specific — ask about ONLY the next single field)
-- updates: Partial<ResumeSession> (any fields to update — accept whatever they gave you)
-- missing_fields: string[] (full remaining list, for your tracking only)`;
+Follow the system prompt's interview strategy. Respond with the OUTPUT FORMAT shown in the system prompt.`;
   }
 
   private async processLlmResponse(
@@ -495,7 +622,14 @@ Return JSON:
       const parsed = JSON.parse(cleaned) as {
         message: string;
         updates: Partial<ResumeSession>;
-        missing_fields: string[];
+        extracted_facts?: {
+          achievements: string[] | null;
+          technologies: string[] | null;
+          impact: string | null;
+          projects: string[] | null;
+          skills_mentioned: string[] | null;
+        };
+        next_focus?: string;
       };
 
       // Apply updates to session
@@ -504,6 +638,25 @@ Return JSON:
         for (const [key, value] of Object.entries(parsed.updates)) {
           if (key in updatedSession && value !== undefined) {
             (updatedSession as Record<string, unknown>)[key] = value;
+          }
+        }
+      }
+
+      // If LLM sent extracted_facts with skills_mentioned, merge into skills
+      if (parsed.extracted_facts?.skills_mentioned?.length) {
+        const existingNames = new Set(
+          (updatedSession.skills ?? []).flatMap(c => c.skills.map(s => s.toLowerCase()))
+        );
+        const newSkills = parsed.extracted_facts.skills_mentioned
+          .map(s => s.trim())
+          .filter(s => s.length > 0 && !existingNames.has(s.toLowerCase()));
+        if (newSkills.length > 0) {
+          if (!updatedSession.skills) updatedSession.skills = [];
+          const existing = updatedSession.skills.find(c => c.name === 'General');
+          if (existing) {
+            existing.skills.push(...newSkills);
+          } else {
+            updatedSession.skills.push({ name: 'General', skills: newSkills });
           }
         }
       }
@@ -692,14 +845,13 @@ Return JSON:
   private generateResponseMessage(
     llmMessage: string,
     atsScore: ATSScoreResult,
-    missingFields: string[],
     isComplete: boolean
   ): string {
     if (isComplete) {
       return llmMessage + '\n\nYour resume is ready! Click "Build" to generate it.';
     }
-    if (atsScore.score >= 88 && missingFields.length <= 1) {
-      return llmMessage + '\n\nYour resume is looking strong. Want me to build it now?';
+    if (atsScore.score >= 70 && isComplete) {
+      return llmMessage;
     }
     return llmMessage;
   }
