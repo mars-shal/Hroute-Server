@@ -51,22 +51,21 @@ interface Message {
 type LLMModel =
   | 'llama-3.3-70b-versatile'
   | 'llama-3.1-8b-instant'
-  | 'mixtral-8x7b-32768'
-  | 'gemma2-9b-it';
+  | 'openai/gpt-oss-20b'
+  | 'openai/gpt-oss-120b';
 
 interface CompletionOptions {
   model?: LLMModel;
   temperature?: number;
   max_tokens?: number;
-  /** Models to fall back to when the primary is rate limited, in priority order. */
   fallbackModels?: LLMModel[];
 }
 
 const MODEL_FALLBACKS: Record<LLMModel, LLMModel[]> = {
-  'llama-3.1-8b-instant': ['gemma2-9b-it', 'mixtral-8x7b-32768', 'llama-3.3-70b-versatile'],
-  'gemma2-9b-it': ['mixtral-8x7b-32768', 'llama-3.1-8b-instant', 'llama-3.3-70b-versatile'],
-  'mixtral-8x7b-32768': ['gemma2-9b-it', 'llama-3.1-8b-instant', 'llama-3.3-70b-versatile'],
-  'llama-3.3-70b-versatile': ['llama-3.1-8b-instant', 'gemma2-9b-it', 'mixtral-8x7b-32768'],
+  'llama-3.3-70b-versatile': ['openai/gpt-oss-120b', 'llama-3.1-8b-instant', 'openai/gpt-oss-20b'],
+  'llama-3.1-8b-instant': ['openai/gpt-oss-20b', 'llama-3.3-70b-versatile', 'openai/gpt-oss-120b'],
+  'openai/gpt-oss-20b': ['llama-3.1-8b-instant', 'openai/gpt-oss-120b', 'llama-3.3-70b-versatile'],
+  'openai/gpt-oss-120b': ['llama-3.3-70b-versatile', 'openai/gpt-oss-20b', 'llama-3.1-8b-instant'],
 };
 
 class LLM {
@@ -75,11 +74,14 @@ class LLM {
   private maxConcurrent: number;
   private active = 0;
   private pending: Array<() => void> = [];
+  primaryModel: LLMModel;
+  fastModel: LLMModel;
 
   constructor(maxConcurrent = 2) {
     this.client = new Groq({ apiKey: process.env.GROQ_API_KEY });
     this.maxConcurrent = maxConcurrent;
-    // Redis is optional — used to persist rate-limit cooldowns across restarts
+    this.primaryModel = (process.env.LLM_PRIMARY_MODEL as LLMModel) || 'llama-3.3-70b-versatile';
+    this.fastModel = (process.env.LLM_FAST_MODEL as LLMModel) || 'openai/gpt-oss-20b';
     this.redis =
       process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN
         ? new RedisModel()
@@ -153,18 +155,19 @@ class LLM {
   private async complete(
     messages: Message[],
     options: CompletionOptions = {},
-    retries = 3,
+    retries = 1,
   ): Promise<string> {
     const {
-      model: primaryModel = 'llama-3.3-70b-versatile',
+      model: primaryModel,
       temperature = 0.7,
       max_tokens = 1024,
       fallbackModels,
     } = options;
 
+    const actualPrimary = primaryModel ?? this.primaryModel;
     const modelsToTry: LLMModel[] = [
-      primaryModel,
-      ...(fallbackModels ?? MODEL_FALLBACKS[primaryModel] ?? []),
+      actualPrimary,
+      ...(fallbackModels ?? MODEL_FALLBACKS[actualPrimary] ?? []),
     ];
 
     let lastError: Error | undefined;
@@ -195,38 +198,51 @@ class LLM {
           logger.info(`[LLM] complete success (${content.length} chars, model=${model})`);
           return content;
         } catch (err) {
-          const isRateLimit =
-            (err as { status?: number })?.status === 429 ||
-            (err as { status?: number })?.status === 413 ||
-            String(err).includes('rate_limit_exceeded') ||
-            String(err).includes('Rate limit reached');
+          const status = (err as { status?: number })?.status;
+          const errMsg = String(err);
+          const errorBody = (err as { error?: { code?: string; message?: string } })?.error;
+          const code = errorBody?.code;
+          const isRateLimit = status === 429 || status === 413 || errMsg.includes('rate_limit_exceeded') || errMsg.includes('Rate limit reached');
 
-          if (!isRateLimit) {
-            logger.error(`[LLM] complete error on ${model}:`, err);
-            await log(`[LLM] complete ERROR on ${model}: ${err}`);
+          if (isRateLimit) {
+            const retryAfter = this.parseRetryAfter(errMsg);
+            if (retryAfter && retryAfter > 120) {
+              await this.persistRateLimit(model, retryAfter);
+            }
+            logger.warn(`[LLM] rate limited ${model} (retryAfter=${retryAfter ?? '?'}s), trying next model`);
+            await log(`[LLM] rate limited ${model}, switching`);
             lastError = err instanceof Error ? err : new Error(String(err));
             break;
           }
 
-          const retryAfter = this.parseRetryAfter(String(err));
-          if (retryAfter && retryAfter > 120) {
-            await this.persistRateLimit(model, retryAfter);
-            logger.warn(`[LLM] daily rate limit on ${model} (${retryAfter}s), trying next model`);
-            await log(`[LLM] daily rate limit ${model}, switching models`);
+          if (status === 400 && (code === 'model_decommissioned' || errMsg.includes('decommissioned') || errMsg.includes('not found') || errMsg.includes('not supported'))) {
+            logger.error(`[LLM] MODEL DECOMMISSIONED: ${model} — permanently unavailable, remove from config`);
+            await log(`[LLM] DECOMMISSIONED ${model}`);
             lastError = err instanceof Error ? err : new Error(String(err));
             break;
           }
 
-          if (attempt < retries) {
-            const waitMs = Math.min(5000 * attempt, 30000);
-            logger.warn(`[LLM] rate limit on ${model} (attempt ${attempt}/${retries}), waiting ${waitMs}ms`);
-            await log(`[LLM] rate limit wait ${waitMs}ms (attempt ${attempt}/${retries})`);
-            await new Promise((r) => setTimeout(r, waitMs));
-            continue;
+          if (status && status >= 500) {
+            logger.warn(`[LLM] server error ${status} on ${model}, trying next model`);
+            await log(`[LLM] server error ${status} ${model}, switching`);
+            lastError = err instanceof Error ? err : new Error(String(err));
+            break;
           }
 
-          logger.warn(`[LLM] ${model} exhausted ${retries} retries, trying next model`);
-          await log(`[LLM] ${model} exhausted, falling back`);
+          if (status === 401 || status === 403) {
+            logger.error(`[LLM] auth error ${status} on ${model} — API key issue, NOT retrying other models`);
+            await log(`[LLM] auth error ${status}, aborting`);
+            throw err;
+          }
+
+          if (status === 400 && errMsg.includes('invalid') && !errMsg.includes('decommissioned')) {
+            logger.error(`[LLM] invalid request on ${model}: ${errMsg.slice(0, 200)}`);
+            await log(`[LLM] invalid request, aborting`);
+            throw err;
+          }
+
+          logger.error(`[LLM] unexpected error on ${model}:`, err);
+          await log(`[LLM] unexpected error ${model}: ${errMsg.slice(0, 200)}`);
           lastError = err instanceof Error ? err : new Error(String(err));
           break;
         } finally {
@@ -235,7 +251,7 @@ class LLM {
       }
     }
 
-    throw lastError ?? new Error(`[LLM] all models exhausted for ${primaryModel}`);
+    throw lastError ?? new Error(`[LLM] all models exhausted for ${actualPrimary}`);
   }
 
   async chat(
@@ -286,7 +302,7 @@ class LLM {
         { role: 'system', content: system },
         { role: 'user', content: prompt },
       ],
-      { temperature: 0.1, model: 'llama-3.1-8b-instant', ...options },
+      { temperature: 0.1, model: this.fastModel, ...options },
     );
     return parse(raw);
   }
@@ -303,7 +319,7 @@ class LLM {
   }
 
   async extractJob(text: string): Promise<Record<string, unknown>> {
-    if (await this.isRateLimited('llama-3.1-8b-instant')) {
+    if (await this.isRateLimited(this.fastModel)) {
       logger.warn('[LLM] extractJob skipped — rate limited');
       await log('[LLM] extractJob SKIPPED (rate limited)');
       return {};
@@ -345,7 +361,7 @@ class LLM {
   }
 
   async extractProfile(text: string): Promise<Record<string, unknown>> {
-    if (await this.isRateLimited('llama-3.1-8b-instant')) {
+    if (await this.isRateLimited(this.fastModel)) {
       logger.warn('[LLM] extractProfile skipped — rate limited');
       return { skills: [] };
     }
@@ -487,7 +503,7 @@ Return JSON with:
             const cleaned = sanitizeJsonString(raw.replace(/```(?:json)?\s*/gi, "").trim());
             return JSON.parse(cleaned) as { content: string };
           },
-          { temperature: 0.1, model: 'llama-3.1-8b-instant', max_tokens: 2048 },
+          { temperature: 0.1, max_tokens: 2048 },
         );
         content = result.content;
         rewrittenCount += 1;
@@ -631,7 +647,7 @@ Return JSON with:
     logger.info(`[LLM] validateResume (text=${resumeText.length} chars)`);
     await log(`[LLM] validateResume starting`);
 
-    if (await this.isRateLimited('llama-3.3-70b-versatile')) {
+    if (await this.isRateLimited(this.primaryModel)) {
       logger.warn('[LLM] validateResume skipped — rate limited');
       await log('[LLM] validateResume SKIPPED (rate limited)');
       return {
