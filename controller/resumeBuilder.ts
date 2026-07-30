@@ -308,16 +308,29 @@ class ResumeBuilderController {
 
     // Call LLM for response — use complete() directly, not reason(), to avoid
     // the "reasoning engine" system prompt overriding our casual tone instructions
-    const llmResponse = await this.llm.complete(
-      [
-        {
-          role: "system",
-          content: CV_COACH_SYSTEM_PROMPT,
-        },
-        { role: "user", content: context },
-      ],
-      { temperature: 0.3, max_tokens: 2048 },
-    );
+    let llmResponse: string;
+    try {
+      llmResponse = await this.llm.complete(
+        [
+          {
+            role: "system",
+            content: CV_COACH_SYSTEM_PROMPT,
+          },
+          { role: "user", content: context },
+        ],
+        { temperature: 0.3, max_tokens: 2048 },
+      );
+    } catch (err) {
+      logger.error(`[ResumeBuilder] LLM call failed for session ${sessionId}:`, err);
+      await log(`[ResumeBuilder] LLM error: ${String(err).slice(0, 200)}`);
+      return {
+        message: "I'm having trouble connecting right now. Please try again in a moment.",
+        session,
+        ats_score: session.ats_score ?? { score: 0, summary: '', issues: [], suggestions: [] },
+        missing_fields: this.getMissingFields(session),
+        is_complete: false,
+      };
+    }
 
     // Parse LLM response and update session
     const updatedSession = await this.processLlmResponse(session, llmResponse, message);
