@@ -213,6 +213,7 @@ class ResumeBuilderController {
   private redis: RedisModel;
   private llm: LLM;
   private db: DatabaseLike;
+  private lastScoredLength = 0;
 
   constructor(db: DatabaseLike) {
     this.redis = new RedisModel();
@@ -304,20 +305,25 @@ class ResumeBuilderController {
     const state = this.computeInterviewState(session);
 
     // Build context for LLM — no fixed field order, feed state
-    const context = this.buildChatContext(session, state, message);
+    const context = this.buildChatContext(session, state);
 
-    // Call LLM for response — use complete() directly, not reason(), to avoid
-    // the "reasoning engine" system prompt overriding our casual tone instructions
+    // Call LLM with full chat history threaded as proper messages
     let llmResponse: string;
     try {
+      const messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }> = [
+        { role: "system", content: CV_COACH_SYSTEM_PROMPT },
+      ];
+
+      // Thread chat history from Redis so the LLM sees the full conversation
+      for (const m of session.chat_history ?? []) {
+        messages.push({ role: m.role, content: m.content });
+      }
+
+      // Current message with session context
+      messages.push({ role: "user", content: `${context}\n\nUser just said: ${message}` });
+
       llmResponse = await this.llm.complete(
-        [
-          {
-            role: "system",
-            content: CV_COACH_SYSTEM_PROMPT,
-          },
-          { role: "user", content: context },
-        ],
+        messages,
         { temperature: 0.3, max_tokens: 2048 },
       );
     } catch (err) {
@@ -353,8 +359,14 @@ class ResumeBuilderController {
     ];
 
     // Recalculate combined score (ATS structural + LLM quality)
+    // Skip LLM scoring on every message to avoid score fluctuation — only re-score
+    // when the resume text has grown >30% since last LLM call.
     const resumeText = this.generateResumeText(updatedSession);
-    const atsScore = await this.computeScore(resumeText);
+    const shouldRunLLM = resumeText.length > this.lastScoredLength * 1.3;
+    const atsScore = shouldRunLLM
+      ? await this.computeScore(resumeText)
+      : scoreResume(resumeText);
+    if (shouldRunLLM) this.lastScoredLength = resumeText.length;
 
     updatedSession.ats_score = atsScore;
     updatedSession.resume_text = resumeText;
@@ -576,8 +588,8 @@ class ResumeBuilderController {
     const hasDeepExperience = state.experience_completeness.some(e => e.depth === 'deep' || e.depth === 'detailed');
     if (hasDeepExperience) return true;
 
-    // If ATS score is already decent (70+) → ready
-    if (session.ats_score && session.ats_score.score >= 70) return true;
+    // If ATS score is already decent (60+) → ready
+    if (session.ats_score && session.ats_score.score >= 60) return true;
 
     // If at least 2 higher-priority things have quality → ready
     const qualityCount = [
@@ -592,13 +604,8 @@ class ResumeBuilderController {
   private buildChatContext(
     session: ResumeSession,
     state: CVState,
-    userMessage: string
   ): string {
     const currentData = JSON.stringify(session, null, 2);
-
-    const historyBlock = (session.chat_history ?? []).length > 0
-      ? (session.chat_history ?? []).map(m => `${m.role}: ${m.content}`).join('\n')
-      : '(no prior messages)';
 
     const stateSummary = `Experience: ${session.experience.map((e, i) => {
       const s = state.experience_completeness[i];
@@ -612,11 +619,6 @@ Contact: ${state.contacted ? 'complete' : 'incomplete'}`;
 
     return `Current session data:
 ${currentData}
-
-Conversation history:
-${historyBlock}
-
-User just said: ${userMessage}
 
 Coverage state (what's been collected so far):
 ${stateSummary}
