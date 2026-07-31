@@ -15,6 +15,16 @@ import { log, logger } from '../utils/logger.js';
 import type { DatabaseLike } from '../model/database.js';
 import { htmlToPdf } from '../utils/pdfGenerator.js';
 
+// ── Constants ──────────────────────────────────────────────────
+
+const EMPTY_ATS_SCORE: ATSScoreResult = {
+  score: 0,
+  grade: 'F',
+  sections: [],
+  issues: [],
+  suggestions: [],
+};
+
 // ── Types ──────────────────────────────────────────────────────
 
 interface ResumeSession {
@@ -34,10 +44,16 @@ interface ResumeSession {
   education: EducationEntry[];
   certifications: CertificationEntry[];
   chat_history: ChatMessage[];
+  pending_facts?: PendingFact[];
   ats_score: ATSScoreResult | null;
   resume_text: string;
   created_at: string;
   updated_at: string;
+}
+
+interface PendingFact {
+  claim: string;
+  status: 'claimed' | 'verified';
 }
 
 interface SkillCategory {
@@ -130,6 +146,101 @@ const OPTIONAL_FIELDS = [
   'certifications',
 ] as const;
 
+/** LLM response shape — the ONLY thing the model is allowed to return */
+interface ParsedLlmResponse {
+  message: string;
+  updates?: Partial<ResumeSession>;
+  extracted_facts?: {
+    achievements: string[] | null;
+    technologies: string[] | null;
+    impact: string | null;
+    projects: string[] | null;
+    skills_mentioned: string[] | null;
+  };
+  pending_verification?: string[] | null;
+  next_focus?: string;
+}
+
+/**
+ * Parse a raw LLM response as strict JSON. Strips accidental markdown fences,
+ * then validates. Returns null when the response is not parseable as JSON —
+ * the caller must re-prompt rather than pass raw text through.
+ */
+function parseLlmJson(raw: string): ParsedLlmResponse | null {
+  const cleaned = raw.replace(/```(?:json)?\s*/gi, '').trim();
+  try {
+    const parsed = JSON.parse(cleaned) as Partial<ParsedLlmResponse>;
+    if (typeof parsed?.message !== 'string' || parsed.message.length === 0) return null;
+    return parsed as ParsedLlmResponse;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Deterministic plausibility gate — flags claims that should be corroborated
+ * before they become resume bullet points. Catches: currency amounts, "X%
+ * increase"-style impact, awards, and large adoption/revenue figures. This is
+ * intentionally a cheap regex heuristic, not an LLM judgment call.
+ */
+function detectSuspiciousClaims(text: string): string[] {
+  const patterns: RegExp[] = [
+    /(?:[$€£₦]|USD|NGN)\s?\d[\d,.]*\s?(?:thousand|million|billion|k|m|b)?/gi,
+    /\d[\d,.]*\s?(?:thousand|million|billion|k|m|b)?\s?(?:users|customers|clients|downloads|revenue|requests|transactions|ARR|MRR|DAU|MAU)/gi,
+    /\d[\d,.]*\s?%\s?(?:increase|growth|reduction|improvement|boost|uplift|rise|jump|decrease|drop)/gi,
+    /\d[\d,.]*(?:x|X)\s?(?:increase|growth|improvement|faster|speedup|boost)/gi,
+    /\b(?:won|awarded|award|recognized as|named|recipient of)\b/gi,
+  ];
+  const hits = new Set<string>();
+  for (const re of patterns) {
+    for (const m of text.matchAll(re)) {
+      const snippet = m[0].trim();
+      if (snippet.length > 1) hits.add(snippet);
+    }
+  }
+  return [...hits].slice(0, 5);
+}
+
+function claimTokens(claim: string): string[] {
+  const matches = claim.match(/\$?[\d,.]+\s*(?:%|percent|thousand|million|billion|k|m|b)?/gi) ?? [];
+  return matches
+    .map(m => m.toLowerCase().replace(/[^a-z0-9%$]/g, ''))
+    .filter(t => /\d/.test(t));
+}
+
+/**
+ * Best-effort check: does a resume value (bullet/summary/project description)
+ * contain a claim we're holding as unverified? Uses compact-form matching so
+ * "2 million" in a claim matches "2m" in a bullet and vice versa.
+ */
+function containsClaim(value: string, claim: string): boolean {
+  const compact = value.toLowerCase().replace(/\s+/g, '');
+  const claimLower = claim.toLowerCase().replace(/\s+/g, '');
+  if (compact.includes(claimLower)) return true;
+  for (const t of claimTokens(claim)) {
+    if (compact.includes(t)) return true;
+    const short = t.replace(/(million|thousand|billion)$/, c =>
+      c === 'million' ? 'm' : c === 'thousand' ? 'k' : 'b');
+    if (short !== t && compact.includes(short)) return true;
+  }
+  return false;
+}
+
+/**
+ * Does the user's message read as an explicit confirmation of pending claims?
+ * Short affirmative answers count; longer messages need measurement context so
+ * a plain "yes, and also I led the team" doesn't accidentally verify numbers.
+ */
+function isClaimConfirmation(message: string, pendingFacts: PendingFact[]): boolean {
+  if (pendingFacts.length === 0) return false;
+  const lower = message.toLowerCase().trim();
+  if (lower.length === 0) return false;
+  const confirmToken = /\b(yes|correct|that'?s right|accurate|verified|confirmed|exactly|indeed|sure|go ahead|include it|100%)\b/.test(lower);
+  if (!confirmToken) return false;
+  if (lower.length < 40) return true;
+  return /\b(measured|tracked|data|metrics?|reported|analytics|dashboard|internal|estimate|report|confirmed|verified)\b/.test(lower);
+}
+
 const CV_COACH_SYSTEM_PROMPT = `You are Hroute's CV Interviewer — a sharp, warm assistant whose job is to extract strong, evidence-based CV content from the user.
 
 YOUR PURPOSE IS NOT TO COMPLETE A FORM.
@@ -173,7 +284,13 @@ CONVERSATION RULES:
 - If the user mentions a project, investigate that project before changing topics.
 - If the user mentions an achievement, ask about its impact.
 - If the user mentions a technology, ask how they used it.
-- If the user mentions leadership, ask what they led and what the result was.
+- If the user mentions a leadership, ask what they led and what the result was.
+
+CLAIM VERIFICATION:
+- If a user's claim seems inflated or hard to verify (e.g., large revenue figures, awards, adoption numbers), ask one clarifying question before accepting it into the resume data. Don't refuse or accuse — just ask for the source or context.
+- For quantifiable claims (numbers, percentages, dollar amounts), ask how it was measured: "How did you measure that?" or "Was this an internal metric you had access to, or an estimate?"
+- Claims that have not been substantiated go into "pending_verification", NOT into "updates". Only once the user confirms the figure or explains how it was measured should the value move into "updates".
+- Do not put a pending figure into both "pending_verification" and "updates" — it must be in exactly one place.
 
 DIGGING INTO EXPERIENCE — PROGRESSIVE QUESTION PATTERN:
 Level 1: "What did you personally build or do there?"
@@ -193,10 +310,10 @@ WHAT NOT TO DO:
 CALIBRATION:
 Talk like a recruiter who's good at interviewing candidates — attentive, specific, evidence-seeking. Not a form, not a hype-man. Short messages, one question, mobile-chat length. If something is weak, say so plainly and suggest a concrete fix.
 
-OUTPUT FORMAT — respond with valid JSON only (no markdown fences):
+OUTPUT FORMAT — respond with ONLY a single valid JSON object. No text before or after it. Do not repeat the "message" field's content outside the JSON. Do not wrap it in markdown code fences. Failure to return valid JSON will be rejected and re-prompted:
 {
   "message": "string — your response to the user, ONE question at the end",
-  "updates": { /* Partial<ResumeSession> — any fields to update based on what the user just said */ },
+  "updates": { /* Partial<ResumeSession> — any fields to update based on what the user just said. Unverified claims must NOT appear here. */ },
   "extracted_facts": {
     "achievements": ["string"] | null,
     "technologies": ["string"] | null,
@@ -204,6 +321,7 @@ OUTPUT FORMAT — respond with valid JSON only (no markdown fences):
     "projects": ["string"] | null,
     "skills_mentioned": ["string"] | null
   },
+  "pending_verification": ["string"] | null,
   "next_focus": "experience" | "education" | "skills" | "projects" | "summary" | "contact" | "achievements" | "guidance"
 }`;
 
@@ -252,6 +370,7 @@ class ResumeBuilderController {
       education: merged.education ?? [],
       certifications: merged.certifications ?? [],
       chat_history: merged.chat_history ?? [],
+      pending_facts: merged.pending_facts ?? [],
       ats_score: null,
       resume_text: '',
       created_at: now,
@@ -301,8 +420,20 @@ class ResumeBuilderController {
       throw new Error('Session not found');
     }
 
+    // Promote previously-claimed facts to verified when the user confirms them
+    const unverifiedFacts = (session.pending_facts ?? []).filter(f => f.status === 'claimed');
+    if (unverifiedFacts.length > 0 && isClaimConfirmation(message, unverifiedFacts)) {
+      session.pending_facts = session.pending_facts!.map(f =>
+        f.status === 'claimed' ? { ...f, status: 'verified' } : f
+      );
+    }
+
     // Compute structured interview state
     const state = this.computeInterviewState(session);
+
+    // Deterministic plausibility gate — flag claims for corroboration before
+    // they can become resume bullet points
+    const suspiciousClaims = detectSuspiciousClaims(message);
 
     // Build context for LLM — no fixed field order, feed state
     const context = this.buildChatContext(session, state);
@@ -320,7 +451,11 @@ class ResumeBuilderController {
       }
 
       // Current message with session context
-      messages.push({ role: "user", content: `${context}\n\nUser just said: ${message}` });
+      let userContent = `${context}\n\nUser just said: ${message}`;
+      if (suspiciousClaims.length > 0) {
+        userContent += `\n\nCLAIM CHECK: The user just made the following claim(s) that need corroboration before they can enter the resume data: ${suspiciousClaims.join('; ')}. Ask ONE question about how the most significant claim was measured or verified (e.g. "How did you measure that?" or "Was that an internal company metric you had access to, or an estimate?"). Do NOT write these figures into "updates" this turn — list them under "pending_verification" instead.`;
+      }
+      messages.push({ role: "user", content: userContent });
 
       llmResponse = await this.llm.complete(
         messages,
@@ -332,24 +467,47 @@ class ResumeBuilderController {
       return {
         message: "I'm having trouble connecting right now. Please try again in a moment.",
         session,
-        ats_score: session.ats_score ?? { score: 0, summary: '', issues: [], suggestions: [] },
+        ats_score: session.ats_score ?? EMPTY_ATS_SCORE,
         missing_fields: this.getMissingFields(session),
         is_complete: false,
       };
     }
 
-    // Parse LLM response and update session
-    const updatedSession = await this.processLlmResponse(session, llmResponse, message);
-
-    // Extract chat message from parsed LLM response (strip code fences, parse JSON)
-    let chatMessage = llmResponse;
-    try {
-      const cleaned = llmResponse.replace(/```(?:json)?\s*/gi, "").trim();
-      const parsed = JSON.parse(cleaned) as { message?: string };
-      if (parsed.message) chatMessage = parsed.message;
-    } catch {
-      // LLM returned plain text — use as-is
+    // Strict JSON contract — never pass raw text through. If the response is
+    // not valid JSON, re-prompt once with a corrective instruction.
+    let parsed = parseLlmJson(llmResponse);
+    if (!parsed) {
+      logger.warn(`[ResumeBuilder] LLM returned non-JSON for session ${sessionId}; re-prompting`);
+      await log(`[ResumeBuilder] LLM non-JSON response: ${llmResponse.slice(0, 200)}`);
+      try {
+        const retryMessages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }> = [
+          { role: "system", content: CV_COACH_SYSTEM_PROMPT },
+          ...(session.chat_history ?? []).map(m => ({ role: m.role, content: m.content })),
+          { role: "user", content: `${context}\n\nUser just said: ${message}` },
+          { role: "assistant", content: llmResponse },
+          { role: "user", content: "Your last output was not valid JSON. Return ONLY the single JSON object described in the system prompt. No text before or after it, no markdown fences." },
+        ];
+        llmResponse = await this.llm.complete(retryMessages, { temperature: 0.3, max_tokens: 2048 });
+        parsed = parseLlmJson(llmResponse);
+      } catch (retryErr) {
+        logger.error(`[ResumeBuilder] JSON retry failed for session ${sessionId}:`, retryErr);
+      }
     }
+    if (!parsed) {
+      logger.warn(`[ResumeBuilder] LLM still non-JSON for session ${sessionId}; degrading gracefully`);
+      return {
+        message: "I'm having trouble formulating my response right now. Please try again in a moment.",
+        session,
+        ats_score: session.ats_score ?? EMPTY_ATS_SCORE,
+        missing_fields: this.getMissingFields(session),
+        is_complete: false,
+      };
+    }
+
+    const updatedSession = await this.processLlmResponse(session, parsed, message);
+
+    // Chat message is always pulled from the parsed JSON — never raw text
+    const chatMessage = parsed.message;
 
     const now = new Date().toISOString();
     updatedSession.chat_history = [
@@ -617,38 +775,61 @@ Education: ${state.education_depth}
 Summary: ${state.summary_quality}
 Contact: ${state.contacted ? 'complete' : 'incomplete'}`;
 
+    const claimStatus = (session.pending_facts ?? []).length > 0
+      ? `\n\nClaim verification status:
+${(session.pending_facts ?? []).map(f => `- "${f.claim}" — ${f.status}`).join('\n')}`
+      : '';
+
     return `Current session data:
 ${currentData}
 
 Coverage state (what's been collected so far):
 ${stateSummary}
+${claimStatus}
 
 Follow the system prompt's interview strategy. Respond with the OUTPUT FORMAT shown in the system prompt.`;
   }
 
   private async processLlmResponse(
     session: ResumeSession,
-    llmResponse: string,
+    parsed: ParsedLlmResponse,
     userMessage: string
   ): Promise<ResumeSession> {
     try {
-      // Clean and parse the response
-      const cleaned = llmResponse.replace(/```(?:json)?\s*/gi, '').trim();
-      const parsed = JSON.parse(cleaned) as {
-        message: string;
-        updates: Partial<ResumeSession>;
-        extracted_facts?: {
-          achievements: string[] | null;
-          technologies: string[] | null;
-          impact: string | null;
-          projects: string[] | null;
-          skills_mentioned: string[] | null;
-        };
-        next_focus?: string;
-      };
+      const updatedSession = { ...session };
+      const pendingFacts = [...(updatedSession.pending_facts ?? [])];
+      for (const claim of parsed.pending_verification ?? []) {
+        const c = claim.trim();
+        if (c.length > 0 && !pendingFacts.some(f => f.claim.toLowerCase() === c.toLowerCase())) {
+          pendingFacts.push({ claim: c, status: 'claimed' });
+        }
+      }
+      updatedSession.pending_facts = pendingFacts;
+
+      // Backstop: strip unverified claims from updates before they reach the resume
+      const unverified = pendingFacts.filter(f => f.status === 'claimed').map(f => f.claim);
+      if (unverified.length > 0 && parsed.updates) {
+        const stripValues = (values: string[]): string[] =>
+          values.filter(v => !unverified.some(c => containsClaim(v, c)));
+        const summary = parsed.updates.summary;
+        if (typeof summary === 'string' && unverified.some(c => containsClaim(summary, c))) {
+          parsed.updates.summary = '';
+        }
+        if (Array.isArray(parsed.updates.experience)) {
+          parsed.updates.experience = parsed.updates.experience.map(e => ({
+            ...e,
+            bullets: Array.isArray(e.bullets) ? stripValues(e.bullets) : e.bullets,
+          }));
+        }
+        if (Array.isArray(parsed.updates.projects)) {
+          parsed.updates.projects = parsed.updates.projects.map(p => ({
+            ...p,
+            description: Array.isArray(p.description) ? stripValues(p.description) : p.description,
+          }));
+        }
+      }
 
       // Apply updates to session
-      const updatedSession = { ...session };
       if (parsed.updates) {
         for (const [key, value] of Object.entries(parsed.updates)) {
           if (key in updatedSession && value !== undefined) {

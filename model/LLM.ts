@@ -157,7 +157,7 @@ class LLM {
     return null;
   }
 
-  private async complete(
+  async complete(
     messages: Message[],
     options: CompletionOptions = {},
     retries = 1,
@@ -277,6 +277,7 @@ class LLM {
     options: CompletionOptions,
   ): Promise<string> {
     const client = this.getGoogleClient();
+    if (!client) throw new Error('[LLM] Google client not configured');
     const model = this.googleModel;
     const { temperature = 0.7, max_tokens = 1024 } = options;
 
@@ -292,8 +293,8 @@ class LLM {
     const response = await client.models.generateContent({
       model,
       contents: userContent,
-      systemInstruction: systemMsg?.content,
       config: {
+        systemInstruction: systemMsg?.content,
         temperature,
         maxOutputTokens: max_tokens,
       },
