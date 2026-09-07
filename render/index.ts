@@ -15,44 +15,9 @@ import { createClient } from '@supabase/supabase-js';
 import puppeteer from 'puppeteer';
 import { generateResumeHtml } from '../utils/resumeHtmlTemplate.js';
 import { log, logger } from '../utils/logger.js';
+import type { ResumeSession } from '../controller/resumeBuilder.js';
 
 // ── Types ──────────────────────────────────────────────────────
-
-interface ResumeSession {
-  id: string;
-  userId: string;
-  full_name: string;
-  email: string;
-  phone: string;
-  location: string;
-  linkedin_url?: string;
-  github_url?: string;
-  portfolio_url?: string;
-  summary: string;
-  skills: Array<{ name: string; skills: string[] }>;
-  experience: Array<{
-    company: string;
-    role: string;
-    start_date: string;
-    end_date: string;
-    bullets: string[];
-  }>;
-  projects: Array<{
-    name: string;
-    description: string[];
-    technologies: string[];
-  }>;
-  education: Array<{
-    institution: string;
-    degree: string;
-    year: string;
-  }>;
-  certifications: Array<{
-    name: string;
-    issuer: string;
-    year: string;
-  }>;
-}
 
 interface BuildRequest {
   sessionId: string;
@@ -150,7 +115,7 @@ async function htmlToPdf(html: string): Promise<Buffer> {
     const page = await browser.newPage();
     
     await page.setContent(html, {
-      waitUntil: 'networkidle0',
+      waitUntil: 'load',
       timeout: 30000,
     });
 

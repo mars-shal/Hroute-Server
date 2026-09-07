@@ -18,6 +18,7 @@ import { normalizeJobCleanupInput } from "../utils/jobCleanup.js";
 import { processJobPipeline } from "../utils/jobPipeline.js";
 import { processJobRow } from "../utils/jobEnrichmentPipeline.js";
 import { logger, log } from "../utils/logger.js";
+import { mapWithConcurrency, sleep } from "../utils/limiter.js";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -52,9 +53,6 @@ export const FEED_SOURCES: FeedSource[] = [
   { domain: "remotive.com", sourceSite: "remotive.com", type: "json", feedUrl: "https://remotive.com/api/remote-jobs" },
   { domain: "weworkremotely.com", sourceSite: "weworkremotely.com", type: "rss", feedUrl: "https://weworkremotely.com/remote-jobs.rss" },
 ];
-
-/** Batch size for feed processing — controls memory ceiling. */
-export const FEED_BATCH_SIZE = 25;
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -383,7 +381,7 @@ async function fetchFeedBySource(sourceSite: string): Promise<FeedJob[]> {
 
 /**
  * Fetch all feeds, deduplicate by source_url, return flat array.
- * Use processFeedsInBatches for memory-efficient processing.
+ * Use ingestFeedJobs for efficient processing.
  */
 export async function fetchAllFeeds(): Promise<FeedJob[]> {
   const [remoteOk, remotive, wwr] = await Promise.allSettled([
@@ -409,48 +407,147 @@ export async function fetchAllFeeds(): Promise<FeedJob[]> {
   return deduped;
 }
 
+// ── Shared Ingestion Pipeline ────────────────────────────────────────────────
+
+export type FeedIngestStats = {
+  stored: number;
+  skipped_stale: number;
+  low_quality: number;
+  errors: string[];
+};
+
+export type FeedIngestHooks = {
+  /** Called once after all jobs are stored (cache invalidation). */
+  onIngestComplete?: () => Promise<void> | void;
+};
+
+/** Parallelism for per-job store work — Supabase upserts are idempotent on
+ * source_url, so pooled writes are safe and keep per-job latency off the
+ * critical path. */
+const FEED_INGEST_CONCURRENCY = Math.max(1, Number(process.env.FEED_INGEST_CONCURRENCY) || 5);
+/** Embedding batch size — MiniLM handles ~32 short texts per forward pass. */
+const FEED_EMBED_BATCH = 32;
+
 /**
- * Fetch all feeds and process jobs in batches via a handler callback.
- * Controls memory by flushing handler between batches of FEED_BATCH_SIZE.
+ * Normalize, quality-check, store, and embed a batch of feed jobs.
+ *
+ * Single shared path for both feed entry points (Discover feed seeds and the
+ * standalone /jobs/discover/feeds route): pooled stores, one batched embed
+ * pass, one bulk vector write, one index-version bump at the end.
  */
-export async function processFeedsInBatches(
-  handler: (job: FeedJob) => Promise<void>,
-): Promise<{ processed: number; errors: string[] }> {
-  let processed = 0;
-  const errors: string[] = [];
-  let batch: FeedJob[] = [];
+export async function ingestFeedJobs(
+  jobs: readonly FeedJob[],
+  db: DatabaseLike,
+  embeddingService: EmbeddingService,
+  hooks: FeedIngestHooks = {},
+  sourceSiteOverride?: string,
+): Promise<FeedIngestStats> {
+  const stats: FeedIngestStats = { stored: 0, skipped_stale: 0, low_quality: 0, errors: [] };
+  const vectors: Array<{ jobId: string; embedding: number[] }> = [];
 
-  const feeds = await fetchAllFeeds();
-
-  for (const job of feeds) {
-    batch.push(job);
-
-    if (batch.length >= FEED_BATCH_SIZE) {
-      for (const item of batch) {
-        try {
-          await handler(item);
-          processed++;
-        } catch (e) {
-          errors.push(`${item.source_url}: ${e}`);
-        }
-      }
-      batch = [];
-    }
-  }
-
-  // flush remaining
-  for (const item of batch) {
+  await mapWithConcurrency(jobs, FEED_INGEST_CONCURRENCY, async (raw) => {
     try {
-      await handler(item);
-      processed++;
-    } catch (e) {
-      errors.push(`${item.source_url}: ${e}`);
+      const normalized = normalizeJobCleanupInput({
+        description: raw.description || raw.title,
+        skills: raw.skills.length > 0 ? [...raw.skills] : undefined,
+        applyUrl: raw.apply_url ?? undefined,
+        sourceUrl: raw.source_url,
+        postedDate: raw.posted_date ?? undefined,
+      });
+
+      if (normalized.isStale) {
+        stats.skipped_stale++;
+        return;
+      }
+
+      const experienceLevel = classifyExperienceLevel(raw.title, normalized.description);
+
+      const enrichmentResult = await processJobRow(
+        {
+          title: raw.title,
+          company: raw.company || "Unknown",
+          location: raw.location ?? null,
+          description: raw.description || raw.title,
+          skills: raw.skills,
+          salary_range: raw.salary_range,
+          remote_status: normalized.remoteStatus,
+          apply_url: normalized.applyUrl,
+          posted_date: raw.posted_date,
+          source_site: sourceSiteOverride ?? raw.source_site,
+          source_url: raw.source_url,
+          logo_url: raw.logo_url,
+          experience_level: experienceLevel,
+        },
+        { runEnrichment: false },
+      );
+
+      const cleanedDesc = enrichmentResult.description.data?.clean ?? normalized.description;
+      const qualityScore = enrichmentResult.description.data?.qualityScore ?? null;
+      if (qualityScore !== null && qualityScore < 50) {
+        stats.low_quality++;
+        logger.info(`[FeedIngest] Low quality (${qualityScore}p): ${raw.title} @ ${raw.company}`);
+      }
+
+      const pipelineResult = processJobPipeline(
+        {
+          title: raw.title,
+          company: raw.company || "Unknown",
+          location: raw.location ?? null,
+          description: cleanedDesc,
+          skills: (enrichmentResult.enriched?.skills as readonly string[] | undefined) ?? normalized.skills,
+          remote_status: normalized.remoteStatus,
+          salary_range: raw.salary_range,
+          apply_url: normalized.applyUrl,
+          posted_date: raw.posted_date,
+          source_site: sourceSiteOverride ?? raw.source_site,
+          source_url: raw.source_url,
+          logo_url: raw.logo_url,
+        },
+        raw.source_url,
+      );
+
+      const storeRes = await db.storeJob({
+        title: raw.title,
+        company: raw.company || "Unknown",
+        location: raw.location ?? null,
+        description: cleanedDesc,
+        skills: (enrichmentResult.enriched?.skills as readonly string[] | undefined) ?? normalized.skills,
+        remote_status: pipelineResult.remote_status_normalized,
+        salary_range: raw.salary_range,
+        apply_url: normalized.applyUrl,
+        posted_date: pipelineResult.posted_date_parsed ?? raw.posted_date ?? null,
+        source_site: sourceSiteOverride ?? raw.source_site,
+        source_url: raw.source_url,
+        logo_url: raw.logo_url,
+        experience_level: enrichmentResult.enriched?.experience_level ?? experienceLevel,
+        crawled_at: new Date().toISOString(),
+      });
+
+      const storedJob = storeRes.data as Array<{ id: string }> | { id: string } | undefined;
+      const jobId = Array.isArray(storedJob) ? storedJob[0]?.id : storedJob?.id;
+
+      if (jobId && cleanedDesc.length > 20) {
+        vectors.push({ jobId, embedding: await embeddingService.embed(cleanedDesc) });
+      }
+      stats.stored++;
+    } catch (jobErr) {
+      stats.errors.push(`[${sourceSiteOverride ?? raw.source_site}] ${raw.source_url}: ${jobErr}`);
+    }
+  });
+
+  // One batched embed pass is already done above (local model, ~1ms/text);
+  // the network win is writing all vectors in one bulk upsert.
+  if (vectors.length > 0) {
+    const vectorRes = await db.storeJobVectorsBulk(vectors);
+    if (vectorRes.status !== 200) {
+      stats.errors.push(`bulk vector write: ${String(vectorRes.response ?? vectorRes.error)}`);
     }
   }
 
-  logger.info(`[FeedFetcher] Processed ${processed} jobs, ${errors.length} errors`);
-  await log(`[FeedFetcher] Processed ${processed} jobs, ${errors.length} errors`);
-  return { processed, errors };
+  await hooks.onIngestComplete?.();
+
+  logger.info(`[FeedIngest] ${stats.stored} stored, ${stats.skipped_stale} stale, ${stats.low_quality} low quality, ${stats.errors.length} errors`);
+  return stats;
 }
 
 // ── Standalone Discovery Pipeline ────────────────────────────────────────────
@@ -458,11 +555,11 @@ export async function processFeedsInBatches(
 /**
  * Ingests all configured feed sources directly into storage.
  * No crawler, no Firecrawl credits, no LLM extraction call.
- * Uses per-source fetchers for source-level stats.
  */
 export async function discoverFromFeeds(
   db: DatabaseLike,
   sources: FeedSource[] = FEED_SOURCES,
+  hooks: FeedIngestHooks = {},
 ): Promise<{ total_jobs: number; errors: string[] }> {
   const errors: string[] = [];
   let totalJobs = 0;
@@ -474,106 +571,17 @@ export async function discoverFromFeeds(
       const rawJobs = await fetchFeedBySource(source.sourceSite);
       logger.info(`[FeedDiscover] ${rawJobs.length} items from ${source.sourceSite}`);
 
-      let sourceJobs = 0;
-      for (const raw of rawJobs) {
-        try {
-          const normalized = normalizeJobCleanupInput({
-            description: raw.description || raw.title,
-            skills: raw.skills.length > 0 ? [...raw.skills] : undefined,
-            applyUrl: raw.apply_url ?? undefined,
-            sourceUrl: raw.source_url,
-            postedDate: raw.posted_date ?? undefined,
-          });
+      const stats = await ingestFeedJobs(rawJobs, db, embeddingService, hooks, source.sourceSite);
+      totalJobs += stats.stored;
+      errors.push(...stats.errors);
 
-          if (normalized.isStale) {
-            continue;
-          }
-
-          const experienceLevel = classifyExperienceLevel(raw.title, normalized.description);
-
-          const enrichmentResult = await processJobRow(
-            {
-              title: raw.title,
-              company: raw.company || "Unknown",
-              location: raw.location ?? null,
-              description: raw.description || raw.title,
-              skills: raw.skills,
-              salary_range: raw.salary_range,
-              remote_status: normalized.remoteStatus,
-              apply_url: normalized.applyUrl,
-              posted_date: raw.posted_date,
-              source_site: source.sourceSite,
-              source_url: raw.source_url,
-              logo_url: raw.logo_url,
-              experience_level: experienceLevel,
-            },
-            { runEnrichment: false },
-          );
-
-          const cleanedDesc = enrichmentResult.description.data?.clean ?? normalized.description;
-          const qualityScore = enrichmentResult.description.data?.qualityScore ?? null;
-          const parsedSalary = enrichmentResult.salary.data;
-
-          if (qualityScore !== null && qualityScore < 50) {
-            logger.info(`[FeedDiscover] Low quality (${qualityScore}p): ${raw.title} @ ${raw.company}`);
-          }
-
-          const pipelineResult = processJobPipeline(
-            {
-              title: raw.title,
-              company: raw.company || "Unknown",
-              location: raw.location ?? null,
-              description: cleanedDesc,
-              skills: enrichmentResult.enriched?.skills ?? normalized.skills,
-              remote_status: normalized.remoteStatus,
-              salary_range: raw.salary_range,
-              apply_url: normalized.applyUrl,
-              posted_date: raw.posted_date,
-              source_site: source.sourceSite,
-              source_url: raw.source_url,
-              logo_url: raw.logo_url,
-            },
-            raw.source_url,
-          );
-
-          const storeRes = await db.storeJob({
-            title: raw.title,
-            company: raw.company || "Unknown",
-            location: raw.location ?? null,
-            description: cleanedDesc,
-            skills: enrichmentResult.enriched?.skills ?? normalized.skills,
-            remote_status: pipelineResult.remote_status_normalized,
-            salary_range: raw.salary_range,
-            apply_url: normalized.applyUrl,
-            posted_date: pipelineResult.posted_date_parsed ?? raw.posted_date ?? null,
-            source_site: source.sourceSite,
-            source_url: raw.source_url,
-            logo_url: raw.logo_url,
-            experience_level: enrichmentResult.enriched?.experience_level ?? experienceLevel,
-            crawled_at: new Date().toISOString(),
-          });
-
-          const storedJob = storeRes.data as Array<{ id: string }> | { id: string } | undefined;
-          const jobId = Array.isArray(storedJob) ? storedJob[0]?.id : storedJob?.id;
-
-          if (jobId) {
-            if (cleanedDesc.length > 20) {
-              const vector = await embeddingService.embed(cleanedDesc);
-              await db.storeJobVector(jobId, vector);
-            }
-            totalJobs++;
-            sourceJobs++;
-          }
-        } catch (jobErr) {
-          errors.push(`[${source.sourceSite}] job error: ${jobErr}`);
-        }
-      }
-      logger.info(`[FeedDiscover] ${source.sourceSite}: stored ${sourceJobs} jobs`);
-      await log(`[FeedDiscover] ${source.sourceSite}: ${sourceJobs} jobs stored`);
+      logger.info(`[FeedDiscover] ${source.sourceSite}: stored ${stats.stored} jobs`);
+      await log(`[FeedDiscover] ${source.sourceSite}: ${stats.stored} jobs stored`);
     } catch (sourceErr) {
       errors.push(`[${source.sourceSite}] fetch failed: ${sourceErr}`);
       logger.error(`[FeedDiscover] ${source.sourceSite} error:`, sourceErr);
     }
+    await sleep(500); // polite gap between feed APIs
   }
 
   return { total_jobs: totalJobs, errors };

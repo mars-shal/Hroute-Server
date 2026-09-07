@@ -9,6 +9,7 @@ import { ResumeController } from "./resumeController.js";
 import { ResumeBuilderController } from "./resumeBuilder.js";
 import { log, logger } from "../utils/logger.js";
 import { discoverFromFeeds } from "../utils/jobFeeds.js";
+import { JobMatcher } from "./jobMatcher.js";
 
 type ApiControllerDeps = {
   auth?: AuthController;
@@ -323,7 +324,11 @@ export function createApiRouter(db: DatabaseLike, deps: ApiControllerDeps = {}):
         return;
       }
 
-      const result = await discoverFromFeeds(db);
+      const result = await discoverFromFeeds(db, undefined, {
+        onIngestComplete: () => {
+          void new JobMatcher(db).bumpJobsIndexVersion();
+        },
+      });
       logger.info(`[API] POST /jobs/discover/feeds → ${result.total_jobs} jobs, ${result.errors.length} errors`);
       await log(`[API] POST /jobs/discover/feeds done: ${result.total_jobs} jobs`);
       res.json({ ...result, cleanup: cleanupResult });
@@ -529,9 +534,9 @@ export function createApiRouter(db: DatabaseLike, deps: ApiControllerDeps = {}):
         return;
       }
 
-      const { sessionId } = req.params;
+      const { sessionId } = req.params as { sessionId: string };
       const session = await resumeBuilder.getSession(sessionId);
-      
+
       if (!session) {
         res.status(404).json({ error: "Session not found" });
         return;
@@ -578,7 +583,7 @@ export function createApiRouter(db: DatabaseLike, deps: ApiControllerDeps = {}):
         return;
       }
 
-      const { sessionId } = req.params;
+      const { sessionId } = req.params as { sessionId: string };
       const updates = req.body as Record<string, unknown>;
 
       const session = await resumeBuilder.updateSession(sessionId, updates);
@@ -599,7 +604,7 @@ export function createApiRouter(db: DatabaseLike, deps: ApiControllerDeps = {}):
         return;
       }
 
-      const { sessionId } = req.params;
+      const { sessionId } = req.params as { sessionId: string };
       const result = await resumeBuilder.generateResume(sessionId, token);
       
       logger.info(`[API] POST /resume-builder/generate/${sessionId} → 200 (score=${result.ats_score.score})`);
@@ -619,7 +624,7 @@ export function createApiRouter(db: DatabaseLike, deps: ApiControllerDeps = {}):
         return;
       }
 
-      const { sessionId } = req.params;
+      const { sessionId } = req.params as { sessionId: string };
       await resumeBuilder.deleteSession(sessionId);
       
       logger.info(`[API] DELETE /resume-builder/session/${sessionId} → 200`);

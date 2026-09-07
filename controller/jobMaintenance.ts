@@ -78,6 +78,9 @@ class JobMaintenanceController {
         pruned: 0,
         stale_found: 0,
         experience_backfilled: 0,
+        source_sites_normalized: 0,
+        junk_killed: 0,
+        duplicates_removed: 0,
         dry_run: dryRun,
         errors: [String(listResult.response ?? listResult.error ?? "Failed to list jobs")],
         message: "Job cleanup failed before scanning rows.",
@@ -156,20 +159,21 @@ class JobMaintenanceController {
       });
       // Keep the first (most recent), delete the rest
       for (let i = 1; i < group.length; i++) {
-        if (deletedIds.has(group[i].id)) continue;
+        const duplicate = group[i];
+        if (!duplicate || deletedIds.has(duplicate.id)) continue;
         if (!dryRun) {
-          const vecRes = await this.db.deleteJobVector(group[i].id);
+          const vecRes = await this.db.deleteJobVector(duplicate.id);
           if (vecRes.status && vecRes.status >= 400) {
-            errors.push(`deleteJobVector ${group[i].id}: ${String(vecRes.response ?? vecRes.error)}`);
+            errors.push(`deleteJobVector ${duplicate.id}: ${String(vecRes.response ?? vecRes.error)}`);
             continue;
           }
-          const delRes = await this.db.deleteJobById(group[i].id);
+          const delRes = await this.db.deleteJobById(duplicate.id);
           if (delRes.status !== 200) {
-            errors.push(`deleteJobById ${group[i].id}: ${String(delRes.response ?? delRes.error)}`);
+            errors.push(`deleteJobById ${duplicate.id}: ${String(delRes.response ?? delRes.error)}`);
             continue;
           }
         }
-        deletedIds.add(group[i].id);
+        deletedIds.add(duplicate.id);
         duplicatesRemoved++;
       }
     }

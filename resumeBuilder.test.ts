@@ -1,5 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from "bun:test";
 import { ResumeBuilderController } from "./controller/resumeBuilder.js";
+import { RedisModel } from "./model/redis.js";
+import type { LLMService } from "./model/LLM.js";
 import type { DatabaseLike } from "./model/database.js";
 
 const TIMEOUT = 30_000;
@@ -12,11 +14,36 @@ const mockDb = {
   authenticateToken: async () => ({ status: 200, userId: "test-user-1" }),
 } as unknown as DatabaseLike;
 
+/**
+ * Deterministic LLM fake — behaves like a well-behaved interviewer that
+ * acknowledges the user but defers field extraction to the deterministic
+ * gap-filler. Keeps the suite off the live Groq free tier (rate limits made
+ * live-LLM runs flaky) while still exercising the full pipeline:
+ * JSON parsing → updates → normalization → scoring → session storage.
+ */
+const fakeLLM: LLMService = {
+  async complete() {
+    return JSON.stringify({
+      message: "Got it — noted. Tell me more about your experience.",
+      updates: {},
+      extracted_facts: null,
+      pending_verification: null,
+      next_focus: "experience",
+    });
+  },
+  async extractProfile() {
+    return { skills: [] };
+  },
+  async resumeScore() {
+    throw new Error("LLM scoring unavailable in tests — local ATS scorer handles it");
+  },
+};
+
 let controller: ResumeBuilderController;
 let sessionId: string;
 
 beforeAll(async () => {
-  controller = new ResumeBuilderController(mockDb);
+  controller = new ResumeBuilderController(mockDb, new RedisModel(), fakeLLM);
   const session = await controller.createSession("test-user-1");
   sessionId = session.id;
 }, TIMEOUT);

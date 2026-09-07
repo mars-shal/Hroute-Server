@@ -5,11 +5,12 @@ import type { DatabaseLike } from "../model/database.js";
 import { JobMatcher } from "./jobMatcher.js";
 import type { JobMatcherService, MatchFilters, MatchProgressHandler } from "./jobMatcher.js";
 import { log, logger } from "../utils/logger.js";
-import { SEARCHURLS, isFeedSource } from "../utils/search.js";
+import { SEARCHURLS, isFeedSource, FEED_SOURCES } from "../utils/search.js";
 import { normalizeJobCleanupInput } from "../utils/jobCleanup.js";
 import { isJunkPage, isLikelyMarketingPage, processJobPipeline } from "../utils/jobPipeline.js";
 import { processJobRow } from "../utils/jobEnrichmentPipeline.js";
-import { classifyExperienceLevel, processFeedsInBatches } from "../utils/jobFeeds.js";
+import { classifyExperienceLevel, discoverFromFeeds } from "../utils/jobFeeds.js";
+import { mapWithConcurrency } from "../utils/limiter.js";
 
 /** Strip carriage returns, tabs, zero-width characters from a URL string */
 function cleanUrl(raw: string): string {
@@ -22,6 +23,14 @@ function cleanUrl(raw: string): string {
 /** Max wall-clock time to spend on a single seed URL (feed or crawler).
  * Prevents a slow/scraping-incompatible site from blocking all 45+ seeds. */
 const PER_SEED_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
+
+/** Politeness delay between seed URLs — Firecrawl /map is cheap, but some
+ * boards throttle bursts. Configurable so ops can trade speed for safety. */
+const SEED_DELAY_MS = Math.max(0, Number(process.env.DISCOVER_SEED_DELAY_MS) || 1500);
+
+/** Page-processing concurrency — each page costs one LLM extraction call, and
+ * LLM.complete() already caps provider concurrency via its own semaphore. */
+const PAGE_CONCURRENCY = Math.max(1, Number(process.env.DISCOVER_PAGE_CONCURRENCY) || 2);
 
 interface DiscoverResult {
   status: number;
@@ -52,11 +61,9 @@ class JobApplicationController {
     await log(`[Discover] Starting with ${urls.length} seed URLs`);
 
     for (const [seedIdx, seedUrl] of urls.entries()) {
-      // Throttle: avoid Firecrawl rate limits between seed URLs (skip first seed)
-      if (seedIdx > 0) {
-        const delay = 5000;
-        logger.info(`[Discover] Waiting ${delay}ms before next seed...`);
-        await new Promise((r) => setTimeout(r, delay));
+      if (seedIdx > 0 && SEED_DELAY_MS > 0) {
+        logger.debug(`[Discover] Waiting ${SEED_DELAY_MS}ms before next seed...`);
+        await new Promise((r) => setTimeout(r, SEED_DELAY_MS));
       }
 
       // Wrap each seed with a timeout so a single slow site doesn't block all 45+
@@ -69,117 +76,23 @@ class JobApplicationController {
 
             // ── Feed path: free public APIs skip Firecrawl + LLM ──
             if (isFeedSource(seedUrl)) {
+              const source = FEED_SOURCES.find((f) => seedUrl.includes(f.domain));
+              if (!source) {
+                logger.warn(`[Discover] Feed seed matched no source config: ${seedUrl}`);
+                return;
+              }
               logger.info(`[Discover] Feed source: ${seedUrl} — bypassing Firecrawl`);
               await log(`[Discover] Feed source: ${seedUrl}`);
 
-              const seedHostname = new URL(seedUrl).hostname.replace("www.", "");
-              const embeddingService = await EmbeddingService.getInstance();
-              let seedJobs = 0;
-
-              const { processed, errors: feedErrors } = await processFeedsInBatches(async (feedJob) => {
-                let jobHostname: string;
-                try {
-                  jobHostname = new URL(feedJob.source_url).hostname.replace("www.", "");
-                } catch {
-                  return;
-                }
-                if (!jobHostname.includes(seedHostname)) return;
-
-                const normalized = normalizeJobCleanupInput({
-                  description: feedJob.description,
-                  skills: feedJob.skills.length > 0 ? feedJob.skills : undefined,
-                  remoteStatus: feedJob.remote_status ?? undefined,
-                  applyUrl: feedJob.apply_url ?? undefined,
-                  sourceUrl: feedJob.source_url,
-                  postedDate: feedJob.posted_date,
-                });
-
-                if (normalized.isStale) return;
-
-                const experienceLevel = classifyExperienceLevel(feedJob.title, normalized.description);
-
-                const enrichmentResult = await processJobRow(
-                  {
-                    title: feedJob.title,
-                    company: feedJob.company,
-                    location: feedJob.location ?? null,
-                    description: feedJob.description,
-                    skills: feedJob.skills,
-                    salary_range: feedJob.salary_range,
-                    remote_status: normalized.remoteStatus,
-                    apply_url: normalized.applyUrl,
-                    posted_date: feedJob.posted_date,
-                    source_site: feedJob.source_site,
-                    source_url: feedJob.source_url,
-                    logo_url: feedJob.logo_url,
-                    experience_level: experienceLevel,
-                  },
-                  { runEnrichment: false },
-                );
-
-                const cleanedDesc = enrichmentResult.description.data?.clean ?? normalized.description;
-                const qualityScore = enrichmentResult.description.data?.qualityScore ?? null;
-
-                if (qualityScore !== null && qualityScore < 50) {
-                  logger.info(`[Discover] Low quality (${qualityScore}p): ${feedJob.title} @ ${feedJob.company}`);
-                }
-
-                const pipelineResult = processJobPipeline(
-                  {
-                    title: feedJob.title,
-                    company: feedJob.company,
-                    location: feedJob.location,
-                    description: cleanedDesc,
-                    skills: enrichmentResult.enriched?.skills ?? normalized.skills,
-                    remote_status: normalized.remoteStatus,
-                    salary_range: feedJob.salary_range,
-                    apply_url: normalized.applyUrl,
-                    posted_date: feedJob.posted_date,
-                    source_site: feedJob.source_site,
-                    source_url: feedJob.source_url,
-                    logo_url: feedJob.logo_url,
-                  },
-                  feedJob.source_url,
-                );
-
-                const storeRes = await this.db.storeJob({
-                  title: feedJob.title,
-                  company: feedJob.company,
-                  location: feedJob.location,
-                  description: cleanedDesc,
-                  skills: enrichmentResult.enriched?.skills ?? normalized.skills,
-                  remote_status: pipelineResult.remote_status_normalized,
-                  salary_range: feedJob.salary_range,
-                  apply_url: normalized.applyUrl,
-                  posted_date: pipelineResult.posted_date_parsed ?? feedJob.posted_date,
-                  source_site: feedJob.source_site,
-                  source_url: feedJob.source_url,
-                  logo_url: feedJob.logo_url,
-                  experience_level: enrichmentResult.enriched?.experience_level ?? experienceLevel,
-                  crawled_at: new Date().toISOString(),
-                });
-
-                const storedJob = storeRes.data as
-                  | Array<{ id: string }>
-                  | { id: string }
-                  | undefined;
-                const jobId =
-                  storedJob && Array.isArray(storedJob)
-                    ? storedJob[0]?.id
-                    : (storedJob as { id: string } | undefined)?.id;
-
-                if (jobId && cleanedDesc.length > 20) {
-                  const vector = await embeddingService.embed(cleanedDesc);
-                  await this.db.storeJobVector(jobId, vector);
-                  await this.matcher.bumpJobsIndexVersion();
-                }
-                seedJobs++;
-              });
-
-              totalJobs += seedJobs;
-              errors.push(...feedErrors);
-              logger.info(`[Discover] Feed seed done: ${seedJobs} jobs from ${seedUrl}`);
-              await log(`[Discover] Feed seed done: ${seedJobs} jobs from ${seedUrl}`);
+              const result = await discoverFromFeeds(
+                this.db,
+                [source],
+                { onIngestComplete: async () => { await this.matcher.bumpJobsIndexVersion(); } },
+              );
+              totalJobs += result.total_jobs;
+              errors.push(...result.errors);
+              logger.info(`[Discover] Feed seed done: ${result.total_jobs} jobs from ${seedUrl}`);
+              await log(`[Discover] Feed seed done: ${result.total_jobs} jobs from ${seedUrl}`);
               return;
             }
 
@@ -198,7 +111,22 @@ class JobApplicationController {
             }
             logger.info(`[Discover] Found ${links.length} links from ${seedUrl}`);
 
-            const pages = await this.crawler.scrapePages(links);
+            // Credit gate: skip URLs we already have in the DB BEFORE spending
+            // Firecrawl scrape credits and LLM extraction tokens on them. One
+            // indexed query replaces re-scraping pages that are already stored.
+            const knownUrls = await this.db.listJobSourceUrls(links);
+            const freshLinks = knownUrls.size > 0
+              ? links.filter((link) => !knownUrls.has(link))
+              : links;
+            if (freshLinks.length < links.length) {
+              logger.info(`[Discover] Skipping ${links.length - freshLinks.length} already-stored URLs from ${seedUrl}`);
+            }
+            if (freshLinks.length === 0) {
+              logger.info(`[Discover] All ${links.length} URLs already stored from ${seedUrl}`);
+              return;
+            }
+
+            const pages = await this.crawler.scrapePages(freshLinks);
             if (pages.length === 0) {
               logger.info(`[Discover] No new content from ${seedUrl}`);
               await log(`[Discover] No content from ${seedUrl}`);
@@ -208,13 +136,14 @@ class JobApplicationController {
 
             const embeddingService = await EmbeddingService.getInstance();
             let seedJobs = 0;
+            const vectors: Array<{ jobId: string; embedding: number[] }> = [];
 
-            for (const { url: pageUrl, markdown } of pages) {
+            await mapWithConcurrency(pages, PAGE_CONCURRENCY, async ({ url: pageUrl, markdown }) => {
               try {
                 if (isJunkPage(pageUrl, markdown)) {
                   logger.info(`[Discover] Skipping ${pageUrl} — junk page detected`);
                   await log(`[Discover] Skip (junk): ${pageUrl}`);
-                  continue;
+                  return;
                 }
 
                 const job = await this.llm.extractJob(markdown);
@@ -222,7 +151,7 @@ class JobApplicationController {
                 if (!job.title || !job.company) {
                   logger.warn(`[Discover] Skipping ${pageUrl} — LLM returned incomplete job`);
                   await log(`[Discover] LLM skip (incomplete): ${pageUrl}`);
-                  continue;
+                  return;
                 }
 
                 const normalized = normalizeJobCleanupInput({
@@ -243,7 +172,7 @@ class JobApplicationController {
                   const ageDays = normalized.ageDays ?? 0;
                   logger.info(`[Discover] Skipping ${pageUrl} — posted ${ageDays.toFixed(0)} days ago (>60)`);
                   await log(`[Discover] Skip (old): ${pageUrl} (${ageDays.toFixed(0)}d)`);
-                  continue;
+                  return;
                 }
 
                 if (isLikelyMarketingPage(
@@ -256,7 +185,7 @@ class JobApplicationController {
                 )) {
                   logger.info(`[Discover] Skipping ${pageUrl} — marketing page (company="${job.company}", source_site="${job.source_site ?? seedUrl}")`);
                   await log(`[Discover] Skip (marketing): ${pageUrl}`);
-                  continue;
+                  return;
                 }
 
                 const rawDesc = typeof job.description === "string" && job.description.trim().length > 0
@@ -295,7 +224,7 @@ class JobApplicationController {
                     company: (job.company as string) ?? "",
                     location: (job.location as string) ?? null,
                     description: cleanedDesc,
-                    skills: enrichmentResult.enriched?.skills as string[] ?? normalized.skills,
+                    skills: (enrichmentResult.enriched?.skills as readonly string[] | undefined) ?? normalized.skills,
                     remote_status: normalized.remoteStatus,
                     salary_range: (job.salary_range as string) ?? null,
                     apply_url: normalized.applyUrl,
@@ -307,14 +236,6 @@ class JobApplicationController {
                   pageUrl,
                 );
 
-                if ((!Array.isArray(job.skills) || job.skills.length === 0) && normalized.skills.length > 0) {
-                  logger.info(`[Discover] Inferred ${normalized.skills.length} skills from description for ${pageUrl}`);
-                }
-
-                if ((typeof job.remote_status !== "string" || job.remote_status === "unknown") && normalized.remoteStatus !== "unknown") {
-                  logger.info(`[Discover] Inferred remote_status=${normalized.remoteStatus} for ${pageUrl}`);
-                }
-
                 const crawlerExperienceLevel = (job.experience_level as string) ?? classifyExperienceLevel(
                   (job.title as string) ?? "",
                   cleanedDesc,
@@ -325,7 +246,7 @@ class JobApplicationController {
                   company: (job.company as string) ?? "",
                   location: (job.location as string) ?? null,
                   description: cleanedDesc,
-                  skills: enrichmentResult.enriched?.skills as string[] ?? normalized.skills,
+                  skills: (enrichmentResult.enriched?.skills as readonly string[] | undefined) ?? normalized.skills,
                   remote_status: pipelineResult.remote_status_normalized,
                   salary_range: (job.salary_range as string) ?? null,
                   apply_url: normalized.applyUrl,
@@ -333,7 +254,7 @@ class JobApplicationController {
                   source_site: (job.source_site as string) ?? seedUrl,
                   source_url: pageUrl,
                   logo_url: (job.logo_url as string) ?? null,
-                  experience_level: enrichmentResult.enriched?.experience_level as string ?? crawlerExperienceLevel,
+                  experience_level: (enrichmentResult.enriched?.experience_level as string | undefined) ?? crawlerExperienceLevel,
                   crawled_at: new Date().toISOString(),
                 });
 
@@ -348,9 +269,7 @@ class JobApplicationController {
 
                 if (jobId) {
                   if (cleanedDesc.length > 20) {
-                    const vector = await embeddingService.embed(cleanedDesc);
-                    await this.db.storeJobVector(jobId, vector);
-                    await this.matcher.bumpJobsIndexVersion();
+                    vectors.push({ jobId, embedding: await embeddingService.embed(cleanedDesc) });
                   }
                   totalJobs++;
                   seedJobs++;
@@ -361,6 +280,13 @@ class JobApplicationController {
               } catch (pageErr) {
                 errors.push(`Failed to process ${pageUrl}: ${pageErr}`);
                 logger.error(`[Discover] Page error ${pageUrl}:`, pageErr);
+              }
+            });
+
+            if (vectors.length > 0) {
+              const vectorRes = await this.db.storeJobVectorsBulk(vectors);
+              if (vectorRes.status !== 200) {
+                errors.push(`bulk vector write for ${seedUrl}: ${String(vectorRes.response ?? vectorRes.error)}`);
               }
             }
 
@@ -386,15 +312,15 @@ class JobApplicationController {
       }
     }
 
-    // Clear scraped_urls set so next discovery re-scrapes all URLs fresh
-    await this.crawler.clearScrapedUrls();
-    logger.info(`[Discover] Cleared scraped_urls from Redis`);
-    await log(`[Discover] Cleared scraped_urls from Redis`);
+    // The scraped_urls set is intentionally NOT cleared here: it persists
+    // across runs so repeat discoveries skip re-scraping pages we've already
+    // paid credits for. Force-refresh by calling clearScrapedUrls() via a
+    // dedicated admin path if the content needs re-pulling.
 
-    // ── Self-check: per-run health metrics ──
+    // ── Self-check: per-run health metrics (lightweight column select) ──
     try {
-      const selfCheckRows = await this.db.listJobs(1000, 0);
-      const jobs = Array.isArray(selfCheckRows) ? selfCheckRows : [];
+      const statsResult = await this.db.getJobHealthStats(1000);
+      const jobs = Array.isArray(statsResult.data) ? statsResult.data : [];
       if (jobs.length > 0) {
         const total = jobs.length;
         const unspecifiedExp = jobs.filter((j: Record<string, unknown>) => (j.experience_level ?? "unspecified") === "unspecified").length;
@@ -411,6 +337,22 @@ class JobApplicationController {
     } catch (checkErr) {
       logger.warn(`[Discover] Self-check query failed: ${checkErr}`);
     }
+
+    // Single cache invalidation for the whole run — bumping per job only
+    // burns a Redis INCR and churns every user's match cache repeatedly.
+    if (totalJobs > 0) {
+      await this.matcher.bumpJobsIndexVersion();
+    }
+
+    const credits = this.crawler.creditsUsed;
+    const mini = this.crawler.miniHandled;
+    logger.info(`[Discover] Firecrawl credits used: ${credits.total} (map=${credits.map}, scrape=${credits.scrape})`);
+    await log(`[Discover] Firecrawl credits used: ${credits.total} (map=${credits.map}, scrape=${credits.scrape})`);
+    if (mini.map + mini.scrape > 0) {
+      logger.info(`[Discover] Mini crawler handled: ${mini.map} discoveries, ${mini.scrape} scrapes (0 credits)`);
+      await log(`[Discover] Mini crawler handled: ${mini.map} discoveries, ${mini.scrape} scrapes (0 credits)`);
+    }
+    LLM.reportTokenUsage("Discover");
 
     return {
       status: 200,

@@ -10,6 +10,7 @@
 
 import { RedisModel } from '../model/redis.js';
 import { LLM } from '../model/LLM.js';
+import type { LLMService } from '../model/LLM.js';
 import { scoreResume, type ATSScoreResult } from '../utils/atsScorer.js';
 import { log, logger } from '../utils/logger.js';
 import type { DatabaseLike } from '../model/database.js';
@@ -103,7 +104,7 @@ interface ChatResponse {
 
 /** Structured interview state — tracks what evidence has been extracted per entry */
 interface CVState {
-  experience_completeness: Record<number, ExperienceCompleteness>;
+  experience_completeness: ExperienceCompleteness[];
   skills_asked: boolean;
   education_depth: 'none' | 'basic' | 'detailed';
   summary_quality: 'none' | 'basic' | 'good' | 'strong';
@@ -126,6 +127,8 @@ interface ExperienceCompleteness {
 
 const SESSION_PREFIX = 'resume:session:';
 const SESSION_EXPIRY = 86400 * 7; // 7 days
+/** Chat turns threaded to the LLM — full histories blow up tokens/latency. */
+const MAX_HISTORY_MESSAGES = 12;
 
 const REQUIRED_FIELDS = [
   'full_name',
@@ -325,17 +328,92 @@ OUTPUT FORMAT — respond with ONLY a single valid JSON object. No text before o
   "next_focus": "experience" | "education" | "skills" | "projects" | "summary" | "contact" | "achievements" | "guidance"
 }`;
 
+// ── Deterministic Field Extraction (LLM-free fallback) ────────
+
+/**
+ * Regex-based field extraction used when the LLM is unavailable (rate limit,
+ * outage, no API key). Keeps the interview pipeline collecting data instead
+ * of dead-ending with an error message.
+ */
+function extractFieldsDeterministic(message: string, session: ResumeSession): Partial<ResumeSession> {
+  const updates: Partial<ResumeSession> = {};
+  const text = message.trim();
+
+  if (!session.email) {
+    const email = text.match(/[\w.+-]+@[\w-]+\.[\w.-]+/)?.[0];
+    if (email) updates.email = email.toLowerCase();
+  }
+  if (!session.phone) {
+    const phone = text.match(/(\+?\d[\d\s\-()]{7,}\d)/)?.[0];
+    if (phone) updates.phone = phone.trim();
+  }
+  if (!session.full_name) {
+    const nameMatch =
+      text.match(/\b(?:my name is|i am|i'm|this is)\s+([A-Z][\w'-]+(?:\s+[A-Z][\w'-]+){0,3})/i) ??
+      text.match(/\b([A-Z][a-z'-]+ [A-Z][a-z'-]+)\b/);
+    // Require name-like shape: 2+ words, no digits, no @
+    const name = nameMatch?.[1]?.trim();
+    if (name && !/\d|@/.test(name) && name.split(/\s+/).length >= 2) {
+      updates.full_name = name;
+    }
+  }
+  if (!session.location) {
+    const locationMatch = text.match(/\b(?:i (?:live|am based|am) in|based in|located in)\s+([A-Za-z][\w\s,'-]{2,50})/i) ??
+      // Bare "City, Country" style messages when location is the next missing field
+      (/^[A-Za-z][\w\s'-]*,\s*[A-Za-z][\w\s'-]*$/.test(text) ? [null, text] : null);
+    const location = (locationMatch?.[1] ?? '').trim().replace(/[.,;]+$/, '');
+    if (location) updates.location = location;
+  }
+  if (!session.summary && !updates.summary) {
+    const looksLikeSummary =
+      !/[\w.+-]+@[\w-]+\.[\w.-]+/.test(text) &&
+      !/^\+?\d[\d\s\-()]{7,}$/.test(text) &&
+      !/^(my name is|i am|i'm|this is)\s+[A-Z]/i.test(text) &&
+      !/^[A-Za-z][\w\s'-]*,\s*[A-Za-z][\w\s'-]*$/.test(text) &&
+      text.split(/\s+/).length >= 3;
+    if (looksLikeSummary && (session.email || session.phone)) {
+      updates.summary = text.slice(0, 500);
+    }
+  }
+
+  return updates;
+}
+
+/** Next missing-field question for the deterministic fallback path. */
+function nextFieldQuestion(session: ResumeSession): string {
+  const missing = REQUIRED_FIELDS.filter((field) => {
+    const value = session[field as keyof ResumeSession];
+    if (Array.isArray(value)) return value.length === 0;
+    return !value || (typeof value === 'string' && value.trim() === '');
+  });
+  const questions: Record<string, string> = {
+    full_name: "What's your full name?",
+    email: "What's the best email for your resume?",
+    phone: "And your phone number?",
+    location: "Where are you based?",
+    summary: "Tell me a bit about yourself — what do you do, and what kind of role are you after?",
+    skills: "What are your strongest skills?",
+    experience: "Tell me about your most recent job — company, role, and what you accomplished.",
+    education: "What's your educational background — institution and degree?",
+  };
+  for (const field of missing) {
+    const q = questions[field];
+    if (q) return q;
+  }
+  return "Tell me more about your experience — what did you build, lead, or improve?";
+}
+
 // ── Main Controller ────────────────────────────────────────────
 
 class ResumeBuilderController {
   private redis: RedisModel;
-  private llm: LLM;
+  private llm: LLMService;
   private db: DatabaseLike;
   private lastScoredLength = 0;
 
-  constructor(db: DatabaseLike) {
-    this.redis = new RedisModel();
-    this.llm = new LLM();
+  constructor(db: DatabaseLike, redis?: RedisModel, llm?: LLMService) {
+    this.redis = redis ?? new RedisModel();
+    this.llm = llm ?? new LLM();
     this.db = db;
   }
 
@@ -445,8 +523,9 @@ class ResumeBuilderController {
         { role: "system", content: CV_COACH_SYSTEM_PROMPT },
       ];
 
-      // Thread chat history from Redis so the LLM sees the full conversation
-      for (const m of session.chat_history ?? []) {
+      // Thread chat history from Redis so the LLM sees the conversation —
+      // capped to the most recent turns to bound tokens and latency.
+      for (const m of (session.chat_history ?? []).slice(-MAX_HISTORY_MESSAGES)) {
         messages.push({ role: m.role, content: m.content });
       }
 
@@ -459,18 +538,12 @@ class ResumeBuilderController {
 
       llmResponse = await this.llm.complete(
         messages,
-        { temperature: 0.3, max_tokens: 2048 },
+        { temperature: 0.3, max_tokens: 1024, caller: 'resumeChat' },
       );
     } catch (err) {
       logger.error(`[ResumeBuilder] LLM call failed for session ${sessionId}:`, err);
       await log(`[ResumeBuilder] LLM error: ${String(err).slice(0, 200)}`);
-      return {
-        message: "I'm having trouble connecting right now. Please try again in a moment.",
-        session,
-        ats_score: session.ats_score ?? EMPTY_ATS_SCORE,
-        missing_fields: this.getMissingFields(session),
-        is_complete: false,
-      };
+      return await this.processDeterministicMessage(sessionId, session, message);
     }
 
     // Strict JSON contract — never pass raw text through. If the response is
@@ -487,21 +560,16 @@ class ResumeBuilderController {
           { role: "assistant", content: llmResponse },
           { role: "user", content: "Your last output was not valid JSON. Return ONLY the single JSON object described in the system prompt. No text before or after it, no markdown fences." },
         ];
-        llmResponse = await this.llm.complete(retryMessages, { temperature: 0.3, max_tokens: 2048 });
+        llmResponse = await this.llm.complete(retryMessages, { temperature: 0.3, max_tokens: 1024, caller: 'resumeChat' });
         parsed = parseLlmJson(llmResponse);
       } catch (retryErr) {
         logger.error(`[ResumeBuilder] JSON retry failed for session ${sessionId}:`, retryErr);
       }
     }
     if (!parsed) {
-      logger.warn(`[ResumeBuilder] LLM still non-JSON for session ${sessionId}; degrading gracefully`);
-      return {
-        message: "I'm having trouble formulating my response right now. Please try again in a moment.",
-        session,
-        ats_score: session.ats_score ?? EMPTY_ATS_SCORE,
-        missing_fields: this.getMissingFields(session),
-        is_complete: false,
-      };
+      logger.warn(`[ResumeBuilder] LLM still non-JSON for session ${sessionId}; using deterministic fallback`);
+      await log(`[ResumeBuilder] LLM non-JSON twice, fallback: ${sessionId}`);
+      return await this.processDeterministicMessage(sessionId, session, message);
     }
 
     const updatedSession = await this.processLlmResponse(session, parsed, message);
@@ -580,7 +648,7 @@ class ResumeBuilderController {
     if (updates.resume_text || updates.summary || updates.skills || updates.experience) {
       const resumeText = this.generateResumeText(updatedSession);
       updatedSession.resume_text = resumeText;
-      updatedSession.ats_score = this.computeScore(resumeText);
+      updatedSession.ats_score = await this.computeScore(resumeText);
     }
 
     // Save updated session
@@ -637,6 +705,53 @@ class ResumeBuilderController {
   }
 
   // ── Private Helpers ──────────────────────────────────────────
+
+  /**
+   * LLM-free chat turn: extract structured fields with regexes, ask for the
+   * next missing field, and score with the local ATS scorer. Used when the
+   * LLM errors or returns garbage so the session still makes progress.
+   */
+  private async processDeterministicMessage(
+    sessionId: string,
+    session: ResumeSession,
+    message: string,
+  ): Promise<ChatResponse> {
+    const updates = extractFieldsDeterministic(message, session);
+    const updatedSession: ResumeSession = {
+      ...session,
+      ...updates,
+      chat_history: [
+        ...(session.chat_history ?? []),
+        { role: "user", content: message, timestamp: new Date().toISOString() },
+      ],
+      updated_at: new Date().toISOString(),
+    };
+
+    const resumeText = this.generateResumeText(updatedSession);
+    updatedSession.resume_text = resumeText;
+    // Local ATS scoring only — the LLM just failed; don't chain another call.
+    updatedSession.ats_score = scoreResume(resumeText);
+
+    const missing = this.getMissingFields(updatedSession);
+    const question = nextFieldQuestion(updatedSession);
+    updatedSession.chat_history = [
+      ...updatedSession.chat_history,
+      { role: "assistant", content: question, timestamp: new Date().toISOString() },
+    ];
+    await this.redis.setWithExpiry({
+      key: `${SESSION_PREFIX}${sessionId}`,
+      value: JSON.stringify(updatedSession),
+      expiry: SESSION_EXPIRY,
+    });
+
+    return {
+      message: question,
+      session: updatedSession,
+      ats_score: updatedSession.ats_score!,
+      missing_fields: missing,
+      is_complete: false,
+    };
+  }
 
   private generateSessionId(): string {
     return `sess_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
@@ -763,7 +878,25 @@ class ResumeBuilderController {
     session: ResumeSession,
     state: CVState,
   ): string {
-    const currentData = JSON.stringify(session, null, 2);
+    // Compact session view — the raw session would duplicate the chat history
+    // (threaded separately) and include derived fields the model never needs.
+    const compactSession = {
+      full_name: session.full_name,
+      email: session.email,
+      phone: session.phone,
+      location: session.location,
+      linkedin_url: session.linkedin_url,
+      github_url: session.github_url,
+      portfolio_url: session.portfolio_url,
+      summary: session.summary,
+      skills: session.skills,
+      experience: session.experience,
+      projects: session.projects,
+      education: session.education,
+      certifications: session.certifications,
+      pending_facts: session.pending_facts,
+    };
+    const currentData = JSON.stringify(compactSession);
 
     const stateSummary = `Experience: ${session.experience.map((e, i) => {
       const s = state.experience_completeness[i];
@@ -858,14 +991,23 @@ Follow the system prompt's interview strategy. Respond with the OUTPUT FORMAT sh
       }
 
       // Normalize skills — LLM may return a string instead of SkillCategory[]
-      if (typeof updatedSession.skills === "string") {
-        const raw = updatedSession.skills as unknown as string;
-        updatedSession.skills = [{ name: "General", skills: raw.split(/[,;]+/).map(s => s.trim()).filter(Boolean) }];
-      } else if (Array.isArray(updatedSession.skills)) {
-        updatedSession.skills = updatedSession.skills.map((s: unknown) => {
-          if (typeof s === "string") return { name: "General", skills: [s] };
-          return s;
-        });
+      const rawSkills: unknown = updatedSession.skills;
+      if (typeof rawSkills === "string") {
+        updatedSession.skills = [{ name: "General", skills: rawSkills.split(/[,;]+/).map(s => s.trim()).filter(Boolean) }];
+      } else if (Array.isArray(rawSkills)) {
+        // LLM output is untrusted — treat entries as unknown before normalizing
+        const rawCategories = rawSkills as unknown[];
+        updatedSession.skills = rawCategories
+          .map((s: unknown): SkillCategory | null => {
+            if (typeof s === "string") return { name: "General", skills: [s] };
+            if (typeof s !== "object" || s === null) return null;
+            const cat = s as Record<string, unknown>;
+            return {
+              name: String(cat.name ?? "General"),
+              skills: Array.isArray(cat.skills) ? cat.skills.map(x => String(x)) : [],
+            };
+          })
+          .filter((c): c is SkillCategory => c !== null);
       }
 
       // Normalize experience — LLM may return bullets as string or missing
@@ -909,19 +1051,39 @@ Follow the system prompt's interview strategy. Respond with the OUTPUT FORMAT sh
         });
       }
 
-      // Normalize education
+      // Normalize education — LLM may return year as start/end dates or a
+      // missing field; EducationEntry is { institution, degree, year }.
       if (Array.isArray(updatedSession.education)) {
         updatedSession.education = updatedSession.education.map((e: unknown) => {
-          if (typeof e !== "object" || e === null) return { institution: String(e ?? ""), degree: "", field: "", start_date: "", end_date: "" };
+          if (typeof e !== "object" || e === null) return { institution: String(e ?? ""), degree: "", year: "" };
           const edu = e as Record<string, unknown>;
+          const year = typeof edu.year === "string" && edu.year.trim()
+            ? edu.year.trim()
+            : [edu.start_date, edu.end_date]
+                .filter((d): d is string => typeof d === "string" && d.trim().length > 0)
+                .join(" – ");
           return {
             institution: String(edu.institution ?? ""),
             degree: String(edu.degree ?? ""),
-            field: String(edu.field ?? ""),
-            start_date: String(edu.start_date ?? ""),
-            end_date: String(edu.end_date ?? ""),
+            year,
           };
         });
+      }
+
+      // Deterministic gap-filler: when the LLM misses a contact/summary field
+      // that the message plainly contains, fill it in. Only still-empty
+      // fields are touched — LLM-provided values always win.
+      const gapFiller = extractFieldsDeterministic(userMessage, updatedSession);
+      for (const [key, value] of Object.entries(gapFiller)) {
+        if (value == null) continue;
+        const current = (updatedSession as Record<string, unknown>)[key];
+        const isEmpty =
+          current == null ||
+          current === '' ||
+          (Array.isArray(current) && current.length === 0);
+        if (isEmpty) {
+          (updatedSession as Record<string, unknown>)[key] = value;
+        }
       }
 
       return updatedSession;
@@ -1046,9 +1208,6 @@ Follow the system prompt's interview strategy. Respond with the OUTPUT FORMAT sh
     if (isComplete) {
       return llmMessage + '\n\nYour resume is ready! Click "Build" to generate it.';
     }
-    if (atsScore.score >= 70 && isComplete) {
-      return llmMessage;
-    }
     return llmMessage;
   }
 
@@ -1105,7 +1264,9 @@ Follow the system prompt's interview strategy. Respond with the OUTPUT FORMAT sh
         full_name: String(profile.display_name ?? ''),
         email: String(profile.email ?? ''),
         location,
-        summary: `Experienced ${String(extracted.role ?? 'professional')} based in ${location || 'unknown location'}.`,
+        summary: location
+          ? `Experienced ${String(extracted.role ?? 'professional')} based in ${location}.`
+          : `Experienced ${String(extracted.role ?? 'professional')}.`,
         skills,
         experience,
       };

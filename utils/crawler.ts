@@ -3,6 +3,9 @@ import { log, logger } from "./logger.js";
 import { RedisModel } from "../model/redis.js";
 import { scrapePage, discoverPageLinks, isNonJobUrl } from "./crawleeScraper.js";
 import { discoverSitemapUrls } from "./sitemapDiscoverer.js";
+import { miniDiscover, miniScrape } from "./miniCrawler.js";
+import { mapWithConcurrency, sleep } from "./limiter.js";
+import { isJunkUrl } from "./jobPipeline.js";
 
 type ApiHandlerData = {
   method: string;
@@ -20,6 +23,14 @@ const SCRAPED_URLS_KEY = "scraped_urls";
  * a 400MB server where Redis shares memory with the app. */
 const SCRAPED_URLS_MAX = 5000;
 
+/** Scrape concurrency — Firecrawl tolerates small parallel bursts; the old
+ * serial loop (5s sleep between every URL) made a 10-link seed take ~50s. */
+const SCRAPE_CONCURRENCY = Math.max(1, Number(process.env.SCRAPE_CONCURRENCY) || 3);
+/** Politeness delay between consecutive requests inside one worker. */
+const SCRAPE_DELAY_MS = Math.max(0, Number(process.env.SCRAPE_DELAY_MS) || 250);
+/** Delay before a single retry after a Firecrawl 429. */
+const RATE_LIMIT_RETRY_MS = Math.max(1000, Number(process.env.FIRECRAWL_429_RETRY_MS) || 5000);
+
 function heapUsedMB(): number {
   return Math.round(process.memoryUsage().heapUsed / 1024 / 1024);
 }
@@ -28,15 +39,53 @@ function rssMB(): number {
   return Math.round(process.memoryUsage().rss / 1024 / 1024);
 }
 
+/** Crawler tier selection — the stack is free-by-default:
+ *  - "mini" (default): self-hosted axios+cheerio crawler, zero credits.
+ *  - "auto": Firecrawl when configured and funded, mini crawler as the
+ *    free fallback for everything else.
+ *  - "firecrawl": Firecrawl only, Crawlee fallbacks (legacy behaviour).
+ * Set CRAWLER_MODE=auto|firecrawl to spend Firecrawl credits. */
+type CrawlerMode = "auto" | "firecrawl" | "mini";
+const CRAWLER_MODE: CrawlerMode =
+  process.env.CRAWLER_MODE === "firecrawl" || process.env.CRAWLER_MODE === "auto"
+    ? (process.env.CRAWLER_MODE as CrawlerMode)
+    : "mini";
+
 class Crawler {
   private apiKey: string;
   private redis: RedisModel;
   /** Set to true when Firecrawl returns 402 Payment Required — suppresses
-   * expensive Crawlee fallbacks for the rest of the cycle. */
+   * expensive fallbacks for the rest of the cycle. */
   private _firecrawlUnavailable = false;
+  /** Firecrawl credit accounting for the current run (map + scrape calls). */
+  private _creditsUsed = { map: 0, scrape: 0 };
+  /** Count of pages/URLs handled by the free mini crawler this run. */
+  private _miniHandled = { map: 0, scrape: 0 };
+  /** Shared per-host politeness state for the mini crawler across the run. */
+  private miniLastRequest = new Map<string, number>();
 
   get firecrawlUnavailable(): boolean {
     return this._firecrawlUnavailable;
+  }
+
+  /** Firecrawl credits spent by this Crawler instance so far. */
+  get creditsUsed(): { map: number; scrape: number; total: number } {
+    return {
+      map: this._creditsUsed.map,
+      scrape: this._creditsUsed.scrape,
+      total: this._creditsUsed.map + this._creditsUsed.scrape,
+    };
+  }
+
+  get miniHandled(): { map: number; scrape: number } {
+    return { ...this._miniHandled };
+  }
+
+  /** True when this call should be served by the free mini crawler. */
+  private get useMiniTier(): boolean {
+    if (CRAWLER_MODE === "mini") return true;
+    if (CRAWLER_MODE === "firecrawl") return false;
+    return !this.apiKey || this._firecrawlUnavailable;
   }
 
   constructor() {
@@ -45,8 +94,17 @@ class Crawler {
   }
 
   private async fireScraper(body_url: string) {
-    logger.info(`[Crawler] fireScraper entry: ${body_url}`);
+    logger.debug(`[Crawler] fireScraper entry: ${body_url}`);
     await log(`[Crawler] fireScraper calling: ${body_url}`);
+
+    // Zero-credit tier: self-hosted mini crawler
+    if (this.useMiniTier) {
+      this._miniHandled.scrape++;
+      const mini = await miniScrape(body_url, this.miniLastRequest);
+      if (mini) return { data: { markdown: mini.markdown } };
+      logger.info(`[Crawler] mini crawler returned nothing for ${body_url}`);
+      return null;
+    }
 
     try {
       const url = "https://api.firecrawl.dev/v2/scrape";
@@ -65,11 +123,41 @@ class Crawler {
         timeout: 30000,
       };
       const response = await axios(data);
+      this._creditsUsed.scrape++;
       const success = Boolean(response.data?.data?.markdown);
-      logger.info(`[Crawler] fireScraper success: ${body_url} (has_markdown=${success})`);
-      await log(`[Crawler] fireScraper success: ${body_url} (has_markdown=${success})`);
+      logger.debug(`[Crawler] fireScraper success: ${body_url} (has_markdown=${success})`);
       return response.data;
     } catch (e) {
+      if (axios.isAxiosError(e) && e.response?.status === 429) {
+        // Rate limited — wait once and retry here instead of burning a
+        // Crawlee fallback (which is slower) or dropping the URL entirely.
+        const retryAfter = Number(e.response.headers?.["retry-after"]) * 1000 || RATE_LIMIT_RETRY_MS;
+        logger.warn(`[Crawler] fireScraper 429 for ${body_url} — retrying in ${retryAfter}ms`);
+        await sleep(retryAfter);
+        try {
+          const url = "https://api.firecrawl.dev/v2/scrape";
+          const data: ApiHandlerData = {
+            method: "POST",
+            url,
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${this.apiKey}`,
+            },
+            data: {
+              url: body_url,
+              onlyMainContent: true,
+              formats: ["markdown"],
+            },
+            timeout: 30000,
+          };
+          const response = await axios(data);
+          this._creditsUsed.scrape++;
+          return response.data;
+        } catch (retryErr) {
+          e = retryErr as typeof e;
+        }
+      }
+
       logger.error(`[Crawler] fireScraper ${body_url}:`, e);
       if (axios.isAxiosError(e) && e.response?.data) {
         const detail = JSON.stringify(e.response.data);
@@ -101,8 +189,17 @@ class Crawler {
   }
 
   private async fireMap(body_url: string) {
-    logger.info(`[Crawler] fireMap entry: ${body_url}`);
+    logger.debug(`[Crawler] fireMap entry: ${body_url}`);
     await log(`[Crawler] fireMap calling: ${body_url}`);
+
+    // Zero-credit tier: self-hosted link discovery
+    if (this.useMiniTier) {
+      this._miniHandled.map++;
+      const links = await miniDiscover(body_url);
+      if (links.length > 0) return { links };
+      logger.info(`[Crawler] mini discovery returned no links for ${body_url}`);
+      return null;
+    }
 
     try {
       const url = "https://api.firecrawl.dev/v2/map";
@@ -122,9 +219,9 @@ class Crawler {
       };
 
       const response = await axios(data);
+      this._creditsUsed.map++;
       const linkCount = response.data?.links?.length ?? 0;
-      logger.info(`[Crawler] fireMap success: ${body_url} — ${linkCount} links`);
-      await log(`[Crawler] fireMap success: ${body_url} — ${linkCount} links`);
+      logger.debug(`[Crawler] fireMap success: ${body_url} — ${linkCount} links`);
       return response.data;
     } catch (e) {
       logger.error(`[Crawler] fireMap ${body_url}:`, e);
@@ -166,7 +263,7 @@ class Crawler {
 
   // Discover job page URLs from a job board seed URL.
   async discoverUrls(seedUrl: string): Promise<string[]> {
-    logger.info(`[Crawler] discoverUrls entry: ${seedUrl}`);
+    logger.debug(`[Crawler] discoverUrls entry: ${seedUrl}`);
 
     const result = await this.fireMap(seedUrl);
     // Firecrawl v2 /v2/map returns links as objects {url, title, description}.
@@ -176,26 +273,20 @@ class Crawler {
     const links: string[] = rawLinks.map((l: unknown) =>
       typeof l === "string" ? l : (l as { url: string }).url,
     );
-    logger.info(`[Crawler] discoverUrls: ${links.length} raw links from ${seedUrl}`);
+    logger.debug(`[Crawler] discoverUrls: ${links.length} raw links from ${seedUrl}`);
 
-    // Filter out non-job URLs before checking Redis or scraping
-    const jobLinks = links.filter((link) => !isNonJobUrl(link));
+    // Filter out non-job and junk URLs before checking Redis or scraping —
+    // every link that survives this check is a Firecrawl credit if scraped.
+    const jobLinks = links.filter((link) => !isNonJobUrl(link) && !isJunkUrl(link));
     const skippedCount = links.length - jobLinks.length;
     if (skippedCount > 0) {
       logger.info(`[Crawler] discoverUrls filtered ${skippedCount} non-job URLs from ${seedUrl}`);
     }
 
-    // Filter out already-scraped URLs
-    const fresh: string[] = [];
-    for (const [i, link] of jobLinks.entries()) {
-      const seen = await this.redis.isMember(SCRAPED_URLS_KEY, link);
-      if (!seen) fresh.push(link);
-
-      // Log progress every 50 links to track long Redis-filter loops
-      if (i > 0 && i % 50 === 0) {
-        logger.info(`[Crawler] discoverUrls Redis filter: ${i}/${links.length} (${fresh.length} fresh so far)`);
-      }
-    }
+    // One smembers round-trip instead of one SISMEMBER per link — Upstash
+    // charges per request and the set is capped at SCRAPED_URLS_MAX anyway.
+    const scraped = new Set(await this.redis.smembers(SCRAPED_URLS_KEY));
+    const fresh = jobLinks.filter((link) => !scraped.has(link));
 
     logger.info(`[Crawler] discoverUrls exit: ${fresh.length} fresh / ${links.length} total from ${seedUrl}`);
     await log(`[Crawler] discoverUrls: ${fresh.length} fresh urls from ${seedUrl}`);
@@ -215,7 +306,7 @@ class Crawler {
     logger.info(`[Crawler] Cleared ${SCRAPED_URLS_KEY} from Redis (heap=${heapUsedMB()}MB, rss=${rssMB()}MB)`);
   }
 
-  /** Keep scraped_urls set under SCRAPED_URLS_MAX by trimming oldest entries. */
+  /** Keep scraped_urls set under SCRAPED_URLS_MAX by trimming random entries. */
   private async pruneScrapedUrls(): Promise<void> {
     try {
       const count = await this.redis.scard(SCRAPED_URLS_KEY);
@@ -234,39 +325,41 @@ class Crawler {
     urls: string[],
   ): Promise<Array<{ url: string; markdown: string }>> {
     const results: Array<{ url: string; markdown: string }> = [];
-    logger.info(`[Crawler] scrapePages entry: ${urls.length} URLs`);
+    logger.info(`[Crawler] scrapePages entry: ${urls.length} URLs (concurrency=${SCRAPE_CONCURRENCY})`);
     await log(`[Crawler] scrapePages starting: ${urls.length} URLs`);
 
-    for (const [idx, url] of urls.entries()) {
-      if (idx > 0) {
-        await new Promise((r) => setTimeout(r, 5000));
+    // Skip already-scraped URLs in one round-trip instead of per-URL checks.
+    const scraped = new Set(await this.redis.smembers(SCRAPED_URLS_KEY));
+    const candidates = urls.filter((url) => {
+      if (isNonJobUrl(url) || isJunkUrl(url)) {
+        logger.debug(`[Crawler] scrapePages skip (non-job): ${url}`);
+        return false;
       }
-
-      if (isNonJobUrl(url)) {
-        logger.info(`[Crawler] scrapePages skip (non-job): ${url}`);
-        continue;
+      if (scraped.has(url)) {
+        logger.debug(`[Crawler] scrapePages skip (already scraped): ${url}`);
+        return false;
       }
+      return true;
+    });
 
-      const alreadyScraped = await this.redis.isMember(SCRAPED_URLS_KEY, url);
-      if (alreadyScraped) {
-        logger.info(`[Crawler] scrapePages skip (already scraped): ${url}`);
-        continue;
-      }
-
+    const scrapedThisRun: string[] = [];
+    await mapWithConcurrency(candidates, SCRAPE_CONCURRENCY, async (url) => {
       const res = await this.fireScraper(url);
       const markdown: string | undefined = res?.data?.markdown;
       if (markdown) {
         results.push({ url, markdown });
-        await this.redis.sadd({ key: SCRAPED_URLS_KEY, member: url });
-        logger.info(`[Crawler] scrapePages scraped: ${url} (${markdown.length} chars)`);
+        scrapedThisRun.push(url);
+        logger.debug(`[Crawler] scrapePages scraped: ${url} (${markdown.length} chars)`);
       } else {
         logger.warn(`[Crawler] scrapePages no markdown: ${url}`);
         await log(`[Crawler] scrapePages NO markdown: ${url}`);
       }
+      await sleep(SCRAPE_DELAY_MS);
+    });
 
-      if (idx > 0 && idx % 25 === 0) {
-        logger.info(`[Crawler] scrapePages progress: ${idx + 1}/${urls.length} (${results.length} scraped so far) [heap=${heapUsedMB()}MB]`);
-      }
+    // Persist what we scraped so future runs skip these URLs.
+    for (const url of scrapedThisRun) {
+      await this.redis.sadd({ key: SCRAPED_URLS_KEY, member: url });
     }
 
     logger.info(`[Crawler] scrapePages exit: ${results.length}/${urls.length} pages scraped [heap=${heapUsedMB()}MB]`);

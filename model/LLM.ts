@@ -49,18 +49,73 @@ interface Message {
   content: string;
 }
 
-type LLMModel = 'llama-3.3-70b-versatile';
+/** Chat models verified against the Groq API on 2026-09-07.
+ * `llama-3.3-70b-versatile` (the old default) was decommissioned upstream. */
+type LLMModel = 'qwen/qwen3.8-27b' | 'qwen/qwen3.6-27b' | 'groq/compound-mini';
 
 interface CompletionOptions {
   model?: LLMModel;
   temperature?: number;
   max_tokens?: number;
   fallbackModels?: LLMModel[];
+  /** Logical caller tag for token accounting, e.g. 'extractJob'. */
+  caller?: string;
 }
 
 const MODEL_FALLBACKS: Record<LLMModel, LLMModel[]> = {
-  'llama-3.3-70b-versatile': [],
+  'qwen/qwen3.8-27b': ['qwen/qwen3.6-27b', 'groq/compound-mini'],
+  'qwen/qwen3.6-27b': ['qwen/qwen3.8-27b', 'groq/compound-mini'],
+  'groq/compound-mini': ['qwen/qwen3.8-27b'],
 };
+
+export type TokenUsage = {
+  prompt_tokens: number;
+  completion_tokens: number;
+  requests: number;
+};
+
+/** Process-wide token accounting across all LLM calls, tagged by caller.
+ * Lets a discover run report exactly how many Groq tokens it burned. */
+class TokenUsageTracker {
+  private totals: TokenUsage = { prompt_tokens: 0, completion_tokens: 0, requests: 0 };
+  private byCaller = new Map<string, TokenUsage>();
+
+  record(caller: string, usage: { prompt_tokens?: number; completion_tokens?: number } | null | undefined): void {
+    const prompt = usage?.prompt_tokens ?? 0;
+    const completion = usage?.completion_tokens ?? 0;
+    this.totals.prompt_tokens += prompt;
+    this.totals.completion_tokens += completion;
+    this.totals.requests += 1;
+
+    const entry = this.byCaller.get(caller) ?? { prompt_tokens: 0, completion_tokens: 0, requests: 0 };
+    entry.prompt_tokens += prompt;
+    entry.completion_tokens += completion;
+    entry.requests += 1;
+    this.byCaller.set(caller, entry);
+  }
+
+  summary(): TokenUsage & { by_caller: Record<string, TokenUsage> } {
+    return {
+      ...this.totals,
+      by_caller: Object.fromEntries(this.byCaller),
+    };
+  }
+
+  logAndReset(label: string): void {
+    const s = this.summary();
+    if (s.requests > 0) {
+      logger.info(`[LLM] token usage (${label}): ${s.requests} requests, ${s.prompt_tokens} prompt + ${s.completion_tokens} completion tokens`);
+      for (const [caller, u] of Object.entries(s.by_caller)) {
+        logger.info(`[LLM]   ${caller}: ${u.requests} req, ${u.prompt_tokens}+${u.completion_tokens} tokens`);
+      }
+    }
+    this.totals = { prompt_tokens: 0, completion_tokens: 0, requests: 0 };
+    this.byCaller.clear();
+  }
+}
+
+/** Shared tracker — every LLM instance reports into it. */
+const tokenTracker = new TokenUsageTracker();
 
 class LLM {
   private client: Groq;
@@ -72,13 +127,18 @@ class LLM {
   fastModel: LLMModel;
   private googleAi: GoogleGenAI | null = null;
   private googleModel: string;
+  /** Local Ollama endpoint (OpenAI-compatible) — free tier of the stack. */
+  private ollamaUrl: string;
+  private ollamaModel: string;
 
   constructor(maxConcurrent = 2) {
     this.client = new Groq({ apiKey: process.env.GROQ_API_KEY });
     this.maxConcurrent = maxConcurrent;
-    this.primaryModel = (process.env.LLM_PRIMARY_MODEL as LLMModel) || 'llama-3.3-70b-versatile';
-    this.fastModel = (process.env.LLM_FAST_MODEL as LLMModel) || 'llama-3.3-70b-versatile';
+    this.primaryModel = (process.env.LLM_PRIMARY_MODEL as LLMModel) || 'qwen/qwen3.8-27b';
+    this.fastModel = (process.env.LLM_FAST_MODEL as LLMModel) || 'qwen/qwen3.8-27b';
     this.googleModel = process.env.GOOGLE_MODEL || 'gemini-3.6-flash';
+    this.ollamaUrl = (process.env.OLLAMA_BASE_URL ?? '').replace(/\/+$/, '');
+    this.ollamaModel = process.env.OLLAMA_MODEL || 'llama3.1:8b';
     this.redis =
       process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN
         ? new RedisModel()
@@ -157,6 +217,54 @@ class LLM {
     return null;
   }
 
+  /** Process-wide token usage snapshot (all LLM instances). */
+  get tokenUsage() {
+    return tokenTracker.summary();
+  }
+
+  /** Log token usage for a logical run and reset the counters. */
+  static reportTokenUsage(label: string): void {
+    tokenTracker.logAndReset(label);
+  }
+
+  private async completeOllama(
+    messages: Message[],
+    options: CompletionOptions,
+  ): Promise<string> {
+    const { temperature = 0.7, max_tokens = 1024, caller = 'ollama' } = options;
+
+    await this.acquire();
+    try {
+      const res = await fetch(`${this.ollamaUrl}/v1/chat/completions`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model: this.ollamaModel,
+          messages,
+          temperature,
+          max_tokens,
+          stream: false,
+        }),
+        signal: AbortSignal.timeout(120_000),
+      });
+      if (!res.ok) {
+        throw new Error(`Ollama HTTP ${res.status}: ${(await res.text()).slice(0, 200)}`);
+      }
+      const data = (await res.json()) as {
+        choices?: Array<{ message?: { content?: string } }>;
+        usage?: { prompt_tokens?: number; completion_tokens?: number };
+      };
+      const content = data.choices?.[0]?.message?.content;
+      if (!content) throw new Error('Empty response from Ollama');
+
+      tokenTracker.record(caller, data.usage);
+      logger.info(`[LLM] Ollama ${this.ollamaModel} success (${content.length} chars)`);
+      return content;
+    } finally {
+      this.release();
+    }
+  }
+
   async complete(
     messages: Message[],
     options: CompletionOptions = {},
@@ -167,7 +275,19 @@ class LLM {
       temperature = 0.7,
       max_tokens = 1024,
       fallbackModels,
+      caller = 'unattributed',
     } = options;
+
+    // Free/local tier first: a configured Ollama server serves open-weight
+    // models with no per-token cost. Any failure falls through to Groq.
+    if (this.ollamaUrl) {
+      try {
+        return await this.completeOllama(messages, { temperature, max_tokens, caller });
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        logger.warn(`[LLM] Ollama failed (${msg.slice(0, 120)}) — falling back to Groq`);
+      }
+    }
 
     const actualPrimary = primaryModel ?? this.primaryModel;
     const modelsToTry: LLMModel[] = [
@@ -200,6 +320,7 @@ class LLM {
           const content = res.choices[0]?.message?.content;
           if (!content) throw new Error('Empty response from Groq');
 
+          tokenTracker.record(caller, res.usage);
           logger.info(`[LLM] complete success (${content.length} chars, model=${model})`);
           return content;
         } catch (err) {
@@ -401,7 +522,7 @@ class LLM {
         const cleaned = raw.replace(/```(?:json)?\s*/gi, "").trim();
         return JSON.parse(cleaned) as Record<string, unknown>;
       },
-      { temperature: 0.1 },
+      { temperature: 0.1, caller: 'extractJob' },
     );
 
     const company = (result.company as string) ?? "";
@@ -439,7 +560,7 @@ class LLM {
         const cleaned = raw.replace(/```(?:json)?\s*/gi, "").trim();
         return JSON.parse(cleaned) as Record<string, unknown>;
       },
-      { temperature: 0.1 },
+      { temperature: 0.1, caller: 'extractProfile' },
     );
     logger.info(`[LLM] extractProfile done`);
     await log(`[LLM] extractProfile result: ${JSON.stringify(result).slice(0, 300)}`);
@@ -454,7 +575,7 @@ class LLM {
     await log(`[LLM] matchResumeToJob starting`);
     const result = await this.reason(
       `Given this resume:\n${resume}\n\nAnd this job description:\n${job}\n\n1. Score the fit from 0.0 to 1.0.\n2. List missing skills.\n3. Explain briefly why this job fits or doesn't.\n\nRespond in JSON: { "similarity": number, "missing_skills": string[], "reason": string }`,
-      { temperature: 0.2 },
+      { temperature: 0.2, caller: 'matchResumeToJob' },
     );
     logger.info(`[LLM] matchResumeToJob done`);
     await log(`[LLM] matchResumeToJob result: ${result.slice(0, 300)}`);
@@ -496,7 +617,7 @@ class LLM {
           suggestions: string[];
         };
       },
-      { temperature: 0.1, max_tokens: 2048 },
+      { temperature: 0.1, max_tokens: 2048, caller: 'resumeScore' },
     );
     logger.info(`[LLM] resumeScore done — score=${result.score}`);
     await log(`[LLM] resumeScore result: score=${result.score} issues=${result.issues.length}`);
@@ -557,7 +678,7 @@ Return JSON with:
             const cleaned = sanitizeJsonString(raw.replace(/```(?:json)?\s*/gi, "").trim());
             return JSON.parse(cleaned) as { content: string };
           },
-          { temperature: 0.1, max_tokens: 2048 },
+          { temperature: 0.1, max_tokens: 2048, caller: 'rewriteSections' },
         );
         content = result.content;
         rewrittenCount += 1;
@@ -618,7 +739,7 @@ Return JSON with:
           suggestions: string[];
         };
       },
-      { temperature: 0.3, max_tokens: 4096 },
+      { temperature: 0.3, max_tokens: 4096, caller: 'improveResume' },
     );
 
     let validation: {
@@ -736,7 +857,7 @@ Return JSON with:
 - one_page: boolean
 - issues: array of { category, severity, description }
 - sections_to_rewrite: string[] (list of section names that need rewriting)`,
-      { temperature: 0.2, max_tokens: 2048 },
+      { temperature: 0.2, max_tokens: 2048, caller: 'validateResume' },
     );
     const cleaned = sanitizeJsonString(raw.replace(/```(?:json)?\s*/gi, "").trim());
     const result = JSON.parse(cleaned) as {
@@ -754,4 +875,9 @@ Return JSON with:
 }
 
 export { LLM };
+
+/** Structural subset used by controllers — lets tests inject fakes without
+ * constructing a real provider client. */
+export type LLMService = Pick<LLM, 'complete' | 'extractProfile' | 'resumeScore'>;
+
 export type { LLMModel, CompletionOptions };

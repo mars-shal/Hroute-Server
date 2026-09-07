@@ -82,10 +82,15 @@ type NormalizedPipelineJob = PipelineJob & {
   readonly is_junk: boolean;
 };
 
+/** URL-only junk check — lets discovery skip these before spending scrape credits. */
+function isJunkUrl(url: string): boolean {
+  const lowerUrl = url.toLowerCase();
+  return JUNK_URL_PARTS.some((part) => lowerUrl.includes(part));
+}
+
 /** Detects crawled pages that are unlikely to contain a single job posting. */
 function isJunkPage(url: string, markdown: string): boolean {
-  const lowerUrl = url.toLowerCase();
-  if (JUNK_URL_PARTS.some((part) => lowerUrl.includes(part))) {
+  if (isJunkUrl(url)) {
     return true;
   }
 
@@ -336,6 +341,7 @@ function processJobPipeline(job: PipelineJob, sourceUrl: string): NormalizedPipe
 export {
   extractDomain,
   isJunkPage,
+  isJunkUrl,
   isLikelyMarketingPage,
   normalizeLocationToArray,
   normalizeRemoteStatusToEnum,

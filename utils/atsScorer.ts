@@ -45,7 +45,9 @@ const REQUIRED_SECTIONS = [
   'education',
 ] as const;
 
-const STANDARD_SECTION_PATTERNS: Record<string, RegExp[]> = {
+type SectionPatternKey = 'summary' | 'skills' | 'experience' | 'education' | 'projects' | 'certifications';
+
+const STANDARD_SECTION_PATTERNS: Record<SectionPatternKey, RegExp[]> = {
   summary: [
     /^#\s+(professional\s+)?summary/im,
     /^#\s+(career\s+)?objective/im,
@@ -195,10 +197,10 @@ function scoreContactInfo(
   let score = 0;
   const details: string[] = [];
 
-  // Check for name (first line, typically)
+  // Check for name (first non-empty line — generated resumes use `# Full Name`)
   const lines = text.split('\n').filter(l => l.trim());
   const firstLine = lines[0] ?? '';
-  if (firstLine && !firstLine.startsWith('#')) {
+  if (firstLine && /[a-zA-Z]/.test(firstLine) && !/^[-–—•]/.test(firstLine.trim())) {
     score += 3;
     details.push('Name present');
   }
@@ -713,17 +715,20 @@ function scoreFormatting(
     suggestions.push('Remove tables and use bullet points instead');
   }
 
-  // Check for columns (bad for ATS)
-  const lines = text.split('\n');
-  const hasColumns = lines.some(l => l.includes('  ') && l.trim().length > 0);
-  if (!hasColumns) {
+  // Check for columns (bad for ATS). A genuine column layout shows repeated
+  // wide whitespace gaps mid-line across several lines — a lone double space
+  // after a period is not a column, so require the pattern on 2+ lines.
+  const allLines = text.split('\n');
+  const columnGapPattern = /\S\s{3,}\S/;
+  const columnLineCount = allLines.filter(l => columnGapPattern.test(l)).length;
+  if (columnLineCount < 2) {
     score += 2;
     details.push('Single column layout');
   } else {
     issues.push({
       category: 'formatting',
       severity: 'high',
-      description: 'Multiple columns detected — ATS cannot parse them',
+      description: `Possible multi-column layout (${columnLineCount} lines with wide gaps) — ATS may misparse`,
     });
     suggestions.push('Use a single column layout');
   }

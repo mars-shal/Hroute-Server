@@ -476,7 +476,7 @@ export async function enrichJob(
         const cleaned = raw.replace(/```(?:json)?\s*/gi, "").trim();
         return JSON.parse(cleaned) as Record<string, unknown>;
       },
-      { temperature: 0.1, max_tokens: 2048 },
+      { temperature: 0.1, max_tokens: 2048, caller: "jobEnrichment" },
     );
 
     // Normalize arrays

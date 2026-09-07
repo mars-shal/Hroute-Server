@@ -539,7 +539,7 @@ class Database {
         .select();
 
       if (error) throw error;
-      logger.info(`[storeJob] Stored: ${JSON.stringify(data)}`);
+      logger.info(`[storeJob] Stored: title="${(job.title as string)?.slice(0, 60)}" rows=${Array.isArray(data) ? data.length : 0}`);
       await log(`[storeJob] success: ${job.title} @ ${job.company}`);
       return { status: 200, data };
     } catch (e) {
@@ -547,6 +547,34 @@ class Database {
       logger.error(`[storeJob] Error: ${msg}`);
       await log(`[storeJob] ERROR: ${msg}`);
       return { response: msg, status: 500 };
+    }
+  }
+
+  /**
+   * Which of the given source_urls already exist in the jobs table.
+   * One indexed `.in()` query — used to skip re-scraping pages we already
+   * stored instead of paying Firecrawl + LLM tokens to rediscover them.
+   */
+  async listJobSourceUrls(urls: string[]): Promise<Set<string>> {
+    const found = new Set<string>();
+    if (urls.length === 0) return found;
+    try {
+      const CHUNK = 100;
+      for (let i = 0; i < urls.length; i += CHUNK) {
+        const chunk = urls.slice(i, i + CHUNK);
+        const { data, error } = await this.supabase
+          .from('jobs')
+          .select('source_url')
+          .in('source_url', chunk);
+        if (error) throw error;
+        for (const row of data ?? []) {
+          if (typeof row?.source_url === 'string') found.add(row.source_url);
+        }
+      }
+      return found;
+    } catch (e) {
+      logger.error(`[listJobSourceUrls] Error: ${e}`);
+      return found; // empty set → callers proceed (fail-open, cost extra credits at worst)
     }
   }
 
@@ -562,6 +590,45 @@ class Database {
     } catch (e) {
       logger.error(`[storeJobVector] Error: ${e}`);
       await log(`[storeJobVector] ERROR: ${e}`);
+      return { response: String(e), status: 500 };
+    }
+  }
+
+  /** Upsert many job vectors in one request. Falls back to per-row writes on failure. */
+  async storeJobVectorsBulk(rows: Array<{ jobId: string; embedding: number[] }>): Promise<ApiResponse> {
+    if (rows.length === 0) return { status: 200 };
+    try {
+      const { error } = await this.supabase
+        .from('job_vectors')
+        .upsert(rows.map((r) => ({ job_id: r.jobId, embedding: r.embedding })), { onConflict: 'job_id' });
+      if (error) throw error;
+      logger.info(`[storeJobVectorsBulk] Stored ${rows.length} vectors`);
+      return { status: 200 };
+    } catch (e) {
+      logger.warn(`[storeJobVectorsBulk] batch failed, falling back to per-row: ${e}`);
+      let failures = 0;
+      for (const row of rows) {
+        const res = await this.storeJobVector(row.jobId, row.embedding);
+        if (res.status !== 200) failures++;
+      }
+      return failures === 0 ? { status: 200 } : { response: `${failures} vector writes failed`, status: 500 };
+    }
+  }
+
+  /**
+   * Lightweight per-run health metrics — selects only the three columns the
+   * self-check needs instead of pulling full job rows with descriptions.
+   */
+  async getJobHealthStats(limit: number = 1000): Promise<ApiResponse> {
+    try {
+      const { data, error } = await this.supabase
+        .from('jobs')
+        .select('experience_level, source_site, apply_url')
+        .limit(limit);
+      if (error) throw error;
+      return { status: 200, data: data ?? [] };
+    } catch (e) {
+      logger.error(`[getJobHealthStats] Error: ${e}`);
       return { response: String(e), status: 500 };
     }
   }
@@ -931,6 +998,9 @@ export type DatabaseLike = Pick<
   | "deleteUser"
   | "storeJob"
   | "storeJobVector"
+  | "storeJobVectorsBulk"
+  | "listJobSourceUrls"
+  | "getJobHealthStats"
   | "getRandomActiveJobs"
   | "getJobsRecent"
   | "getJobBySourceUrl"

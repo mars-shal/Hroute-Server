@@ -59,7 +59,7 @@ class EmbeddingService {
         logger.warn(`[EmbeddingService] MEMORY_LIMIT=${MEMORY_LIMIT_MB}MB, current heap=${currentHeap}MB — model load would exceed 85% threshold`);
       }
 
-      logger.info(`[EmbeddingService] Loading model Xenova/all-MiniLM-L6-v2 (heap=${currentHeap}MB, rss=${rssMB()}MB)...`);
+      logger.debug(`[EmbeddingService] Loading model Xenova/all-MiniLM-L6-v2 (heap=${currentHeap}MB, rss=${rssMB()}MB)...`);
       await log('[EmbeddingService] Loading embedding model...');
       this.extractor = await pipeline(
         'feature-extraction',
@@ -72,27 +72,37 @@ class EmbeddingService {
   }
 
   async embed(text: string): Promise<number[]> {
-    logger.info(`[EmbeddingService] embed (text.length=${text.length})`);
+    logger.debug(`[EmbeddingService] embed (text.length=${text.length})`);
     const extractor = await this.getExtractor();
     const result = await extractor(text, {
       pooling: 'mean',
       normalize: true,
     });
     const vec = Array.from(result.data) as number[];
-    logger.info(`[EmbeddingService] embed done (vector_dim=${vec.length})`);
+    logger.debug(`[EmbeddingService] embed done (vector_dim=${vec.length})`);
     return vec;
   }
 
   async embedBatch(texts: string[]): Promise<number[][]> {
-    logger.info(`[EmbeddingService] embedBatch (count=${texts.length})`);
+    if (texts.length === 0) return [];
+    if (texts.length === 1) return [await this.embed(texts[0]!)];
+
+    logger.debug(`[EmbeddingService] embedBatch (count=${texts.length})`);
     const extractor = await this.getExtractor();
     const results = await extractor(texts, {
       pooling: 'mean',
       normalize: true,
     });
-    const arr = results as { data: { length: number } };
-    const vecs = [Array.from(arr.data) as number[]];
-    logger.info(`[EmbeddingService] embedBatch done (${vecs.length} vectors)`);
+
+    // Batched output is [batch, dim] — slice one vector per input text.
+    const dims = (results as { dims?: number[] }).dims ?? [];
+    const dim = dims.length === 2 ? dims[1]! : (results as { data: { length: number } }).data.length / texts.length;
+    const flat = Array.from(results.data) as number[];
+    const vecs: number[][] = [];
+    for (let i = 0; i < texts.length; i++) {
+      vecs.push(flat.slice(i * dim, (i + 1) * dim));
+    }
+    logger.debug(`[EmbeddingService] embedBatch done (${vecs.length} vectors, dim=${dim})`);
     return vecs;
   }
 }

@@ -65,6 +65,9 @@ export function createFakeDatabase(options: FakeDatabaseOptions = {}) {
     async getResumeSignedUrl() {
       return { status: 200, url: "https://example.com/resume.pdf" };
     },
+    async getGeneratedResumeUrl() {
+      return { status: 200, url: "https://example.com/generated-resume.pdf" };
+    },
     async getData() {
       return { status: 200, data: null };
     },
@@ -119,6 +122,27 @@ export function createFakeDatabase(options: FakeDatabaseOptions = {}) {
     },
     async storeJobVector() {
       return { status: 200 };
+    },
+    async storeJobVectorsBulk() {
+      return { status: 200 };
+    },
+    async listJobSourceUrls(urls: string[]) {
+      const stored = new Set(
+        state.jobs
+          .map((item) => item.source_url)
+          .filter((url): url is string => typeof url === "string"),
+      );
+      return new Set(urls.filter((url) => stored.has(url)));
+    },
+    async getJobHealthStats(limit = 1000) {
+      return {
+        status: 200,
+        data: state.jobs.slice(0, limit).map((item) => ({
+          experience_level: item.experience_level,
+          source_site: item.source_site,
+          apply_url: item.apply_url,
+        })),
+      };
     },
     async getJobsRecent(limit = 50) {
       return { status: 200, data: state.jobs.slice(0, limit) };

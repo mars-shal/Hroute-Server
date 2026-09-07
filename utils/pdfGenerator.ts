@@ -6,15 +6,16 @@ export async function htmlToPdf(html: string): Promise<Buffer> {
   const browser = await puppeteer.launch({
     headless: true,
     args: chromium.args,
-    defaultViewport: chromium.defaultViewport,
     executablePath: await chromium.executablePath(),
   });
 
   try {
     const page = await browser.newPage();
 
+    // Resume HTML is fully self-contained (no network resources), so waiting
+    // for 'load' is sufficient — and much faster than networkidle.
     await page.setContent(html, {
-      waitUntil: 'networkidle0',
+      waitUntil: 'load',
       timeout: 30000,
     });
 

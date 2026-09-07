@@ -32,7 +32,13 @@ export const log = async (text: any, file: string = defaultLogFile) => {
   }
 };
 
+const LOG_LEVEL = process.env.LOG_LEVEL ?? "info";
+const DEBUG_ENABLED = LOG_LEVEL === "debug";
+
 export const logger = {
+  debug: (...args: unknown[]) => {
+    if (DEBUG_ENABLED) console.log(chalk.blue("[Server:debug]"), ...args);
+  },
   info: (...args: unknown[]) => console.log(chalk.green('[Server]'), ...args),
   warn: (...args: unknown[]) => console.warn(chalk.yellow('[Server]'), ...args),
   error: (...args: unknown[]) => console.error(chalk.red('[Server]'), ...args),

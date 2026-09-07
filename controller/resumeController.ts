@@ -44,18 +44,6 @@ type ExportResult = {
   error?: string;
 };
 
-/** Convert markdown to PDF buffer via markdown-pdf */
-function mdToPdf(md: string): Promise<Buffer> {
-  return new Promise((resolve, reject) => {
-    markdownpdf()
-      .from.string(md)
-      .to.buffer((err: Error | null, buf: Buffer) => {
-        if (err) reject(err);
-        else resolve(buf);
-      });
-  });
-}
-
 class ResumeController {
   private db: DatabaseLike;
   private llm: LLM;
