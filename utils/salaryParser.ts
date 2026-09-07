@@ -30,7 +30,7 @@ const CURRENCY_MAP: Record<string, string> = {
   "₦": "NGN", ngn: "NGN", "ngn₦": "NGN",
   "¥": "JPY", jpy: "JPY",
   "₵": "GHS", ghs: "GHS",
-  "r": "ZAR", zar: "ZAR", "r": "ZAR",
+  "r": "ZAR", zar: "ZAR",
   ksh: "KES", "kes": "KES",
   "a$": "AUD", aud: "AUD",
   "c$": "CAD", cad: "CAD",
@@ -58,10 +58,11 @@ function extractCurrency(raw: string): { currency: string | null; remaining: str
 
   // Try trailing currency code like "6M - 8M NGN"
   const trailingMatch = cleaned.match(/\b([A-Za-z]{3})\s*$/);
-  if (trailingMatch && CURRENCY_MAP[trailingMatch[1].toLowerCase()]) {
+  const trailingCode = trailingMatch?.[1]?.toLowerCase();
+  if (trailingCode && CURRENCY_MAP[trailingCode]) {
     return {
-      currency: CURRENCY_MAP[trailingMatch[1].toLowerCase()],
-      remaining: cleaned.slice(0, trailingMatch.index).trim(),
+      currency: CURRENCY_MAP[trailingCode],
+      remaining: cleaned.slice(0, trailingMatch?.index ?? 0).trim(),
     };
   }
 
@@ -88,7 +89,7 @@ function parseNumber(s: string): number | null {
   const match = cleaned.match(/^(\d+(?:\.\d+)?)(k|m|b)?$/i);
   if (!match) return null;
 
-  const num = parseFloat(match[1]);
+  const num = parseFloat(match[1]!);
   const suffix = (match[2] ?? "").toLowerCase();
 
   if (suffix === "k") return Math.round(num * 1000);
@@ -109,8 +110,8 @@ function extractNumbers(raw: string): { min: number | null; max: number | null; 
     /(?:[$\u20ac\u00a3\u20a6\u00a5]\s*)?(\d{1,3}(?:[kKmMBb])?)\s*(?:[-–to]|to)\s*(?:[$\u20ac\u00a3\u20a6\u00a5]\s*)?(\d{1,3}(?:[kKmMBb])?)/,
   );
   if (rangeMatch) {
-    const min = parseNumber(rangeMatch[1]);
-    const max = parseNumber(rangeMatch[2]);
+    const min = parseNumber(rangeMatch[1]!);
+    const max = parseNumber(rangeMatch[2]!);
     if (min !== null && max !== null && max >= min) {
       return { min, max, confidence: max - min < 200_000 ? "high" : "medium", type: "range" };
     }
@@ -120,7 +121,7 @@ function extractNumbers(raw: string): { min: number | null; max: number | null; 
   // Try matching full number (4+ digits or with k/m/b suffix)
   const singleMatch = stripped.match(/(\d{4,}|\d{1,3}[kKmMbB])/);
   if (singleMatch) {
-    const num = parseNumber(singleMatch[1]);
+    const num = parseNumber(singleMatch[1]!);
     if (num !== null) {
       return { min: num, max: num, confidence: "high", type: "fixed" };
     }
@@ -128,7 +129,7 @@ function extractNumbers(raw: string): { min: number | null; max: number | null; 
   // Fallback: try any number
   const anyMatch = stripped.match(/(\d+(?:\.\d+)?[kKmMbB]?)/);
   if (anyMatch) {
-    const num = parseNumber(anyMatch[1]);
+    const num = parseNumber(anyMatch[1]!);
     if (num !== null) {
       return { min: num, max: num, confidence: "medium", type: "fixed" };
     }

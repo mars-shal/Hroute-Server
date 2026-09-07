@@ -37,8 +37,17 @@ const DEFAULT_OPTIONS: TemplateOptions = {
 
 // ── Main Function ──────────────────────────────────────────────
 
+/** Display fields the template needs — ResumeSession and the demo resume
+ * both satisfy this; the render server receives the full session anyway. */
+export type ResumeDisplayData = Pick<
+  ResumeSession,
+  | 'full_name' | 'email' | 'phone' | 'location'
+  | 'linkedin_url' | 'github_url' | 'portfolio_url'
+  | 'summary' | 'skills' | 'experience' | 'projects' | 'education' | 'certifications'
+>;
+
 function generateResumeHtml(
-  session: ResumeSession,
+  session: ResumeDisplayData,
   options: TemplateOptions = {}
 ): string {
   const opts = { ...DEFAULT_OPTIONS, ...options };
@@ -98,7 +107,7 @@ function generateEntryHeader(title: string, subtitle?: string, dates?: string): 
 // ── Section Generators ─────────────────────────────────────────
 
 function generateHeader(
-  session: ResumeSession,
+  session: ResumeDisplayData,
   options: TemplateOptions
 ): string {
   const contactParts: string[] = [];
@@ -379,7 +388,7 @@ function generateCertifications(certifications: CertificationEntry[], options: T
 
 function escapeHtml(text: string): string {
   const map: Record<string, string> = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' };
-  return text.replace(/[&<>"']/g, c => map[c]);
+  return text.replace(/[&<>"']/g, c => map[c] ?? c);
 }
 
 function formatMarkdownToHtml(markdown: string): string {

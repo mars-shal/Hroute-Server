@@ -34,7 +34,9 @@ test("job similarity ranks the strongest match first and writes cache", async ()
   const result = await matcher.match(
     "access-token",
     { location: "Lagos", remote: true, limit: 5 },
-    (step) => progress.push(step.stage),
+    (step) => {
+    progress.push(step.stage);
+  },
   );
 
   expect(result.status).toBe(200);

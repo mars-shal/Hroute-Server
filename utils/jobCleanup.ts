@@ -1,4 +1,4 @@
-const TECH_SKILL_KEYWORDS = [
+export const TECH_SKILL_KEYWORDS = [
   "javascript",
   "typescript",
   "python",

@@ -296,6 +296,12 @@ class LLM {
     ];
 
     let lastError: Error | undefined;
+    /** Short rate-limit waits consumed on the current model — Groq free tier
+     * OTPM windows are often just a few seconds, so waiting beats model-hopping
+     * (every fallback model shares the same org-wide token budget). */
+    let rateLimitWaits = 0;
+    const MAX_RATE_LIMIT_WAITS = 3;
+    const MAX_RATE_LIMIT_WAIT_S = 30;
 
     for (const model of modelsToTry) {
       if (await this.isRateLimited(model)) {
@@ -334,6 +340,15 @@ class LLM {
             const retryAfter = this.parseRetryAfter(errMsg);
             if (retryAfter && retryAfter > 120) {
               await this.persistRateLimit(model, retryAfter);
+            }
+            // Short window → sleep it out and retry the SAME model. A brief
+            // OTPM window (e.g. "try again in 4.74s") clears on its own.
+            if (retryAfter && retryAfter <= MAX_RATE_LIMIT_WAIT_S && rateLimitWaits < MAX_RATE_LIMIT_WAITS) {
+              rateLimitWaits++;
+              logger.warn(`[LLM] rate limited ${model} (${retryAfter}s window) — waiting it out (wait ${rateLimitWaits}/${MAX_RATE_LIMIT_WAITS})`);
+              await new Promise((r) => setTimeout(r, retryAfter * 1000 + 500));
+              attempt--; // don't consume an attempt for the wait
+              continue;
             }
             logger.warn(`[LLM] rate limited ${model} (retryAfter=${retryAfter ?? '?'}s), trying next model`);
             await log(`[LLM] rate limited ${model}, switching`);
@@ -617,7 +632,7 @@ class LLM {
           suggestions: string[];
         };
       },
-      { temperature: 0.1, max_tokens: 2048, caller: 'resumeScore' },
+      { temperature: 0.1, max_tokens: 1024, caller: 'resumeScore' },
     );
     logger.info(`[LLM] resumeScore done — score=${result.score}`);
     await log(`[LLM] resumeScore result: score=${result.score} issues=${result.issues.length}`);
@@ -678,7 +693,7 @@ Return JSON with:
             const cleaned = sanitizeJsonString(raw.replace(/```(?:json)?\s*/gi, "").trim());
             return JSON.parse(cleaned) as { content: string };
           },
-          { temperature: 0.1, max_tokens: 2048, caller: 'rewriteSections' },
+          { temperature: 0.1, max_tokens: 1024, caller: 'rewriteSections' },
         );
         content = result.content;
         rewrittenCount += 1;
@@ -739,7 +754,7 @@ Return JSON with:
           suggestions: string[];
         };
       },
-      { temperature: 0.3, max_tokens: 4096, caller: 'improveResume' },
+      { temperature: 0.3, max_tokens: 2048, caller: 'improveResume' },
     );
 
     let validation: {
@@ -857,7 +872,7 @@ Return JSON with:
 - one_page: boolean
 - issues: array of { category, severity, description }
 - sections_to_rewrite: string[] (list of section names that need rewriting)`,
-      { temperature: 0.2, max_tokens: 2048, caller: 'validateResume' },
+      { temperature: 0.2, max_tokens: 1024, caller: 'validateResume' },
     );
     const cleaned = sanitizeJsonString(raw.replace(/```(?:json)?\s*/gi, "").trim());
     const result = JSON.parse(cleaned) as {

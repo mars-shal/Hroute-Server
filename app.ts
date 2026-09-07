@@ -3,11 +3,12 @@ import { createServer, type Server as HttpServer } from "http";
 import type { DatabaseLike } from "./model/database.js";
 import { createApiRouter } from "./controller/apiController.js";
 import { generateResumeHtml } from "./utils/resumeHtmlTemplate.js";
+import type { ResumeDisplayData } from './utils/resumeHtmlTemplate.js';
 import { htmlToPdf } from "./utils/pdfGenerator.js";
 
 // ── Demo Resume Data ────────────────────────────────────────
 
-const DEMO_RESUME = {
+const DEMO_RESUME: ResumeDisplayData = {
   full_name: "Sarah Chen",
   email: "sarah.chen@example.com",
   phone: "+1 (555) 234-5678",

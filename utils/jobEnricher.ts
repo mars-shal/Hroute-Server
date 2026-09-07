@@ -476,7 +476,7 @@ export async function enrichJob(
         const cleaned = raw.replace(/```(?:json)?\s*/gi, "").trim();
         return JSON.parse(cleaned) as Record<string, unknown>;
       },
-      { temperature: 0.1, max_tokens: 2048, caller: "jobEnrichment" },
+      { temperature: 0.1, max_tokens: 1024, caller: "jobEnrichment" },
     );
 
     // Normalize arrays
@@ -517,7 +517,7 @@ export async function enrichJob(
       },
       skills,
       experience: {
-        level: (["internship", "entry", "junior", "mid", "senior", "lead", "manager", "director", "executive"] as const)
+        level: (["internship", "entry", "junior", "mid", "senior", "lead", "manager", "director", "executive"] as readonly string[])
           .includes(result.experience_level as string)
           ? result.experience_level as EnrichedJob["experience"]["level"]
           : "unknown",
@@ -525,11 +525,11 @@ export async function enrichJob(
         max_years: typeof result.experience_max_years === "number" ? result.experience_max_years : null,
       },
       education: normalizeArr(result.education),
-      employment_type: (["full-time", "part-time", "contract", "freelance", "internship"] as const)
+      employment_type: (["full-time", "part-time", "contract", "freelance", "internship"] as readonly string[])
         .includes(result.employment_type as string)
         ? result.employment_type as EnrichedJob["employment_type"]
         : "unknown",
-      remote_scope: (["worldwide", "africa", "country", "region", "city", "onsite"] as const)
+      remote_scope: (["worldwide", "africa", "country", "region", "city", "onsite"] as readonly string[])
         .includes(result.remote_scope as string)
         ? result.remote_scope as RemoteScope
         : "unknown",

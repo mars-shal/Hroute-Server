@@ -75,7 +75,7 @@ const himalayasExtractor: ExtractionStrategy = (text: string): string | null => 
   let endIdx = lines.length;
 
   for (let i = 0; i < lines.length; i++) {
-    const lower = lines[i].toLowerCase();
+    const lower = (lines[i] ?? "").toLowerCase();
     if (startMarkers.some(m => lower.startsWith(m) || lower.includes(m))) {
       startIdx = i;
       break;
@@ -85,7 +85,7 @@ const himalayasExtractor: ExtractionStrategy = (text: string): string | null => 
   if (startIdx === -1) return null;
 
   for (let i = startIdx + 1; i < lines.length; i++) {
-    const lower = lines[i].toLowerCase();
+    const lower = (lines[i] ?? "").toLowerCase();
     if (endMarkers.some(m => lower.startsWith(m) || lower.includes(m))) {
       endIdx = i;
       break;

@@ -4,11 +4,14 @@
       "src": "index.ts",
       "use": "@vercel/node",
       "config": {
-        "maxDuration": 30
+        "maxDuration": 60
       }
     }
   ],
   "routes": [
-    { "src": "/(.*)", "dest": "index.ts" }
+    {
+      "src": "/(.*)",
+      "dest": "index.ts"
+    }
   ]
 }

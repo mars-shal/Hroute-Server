@@ -5,6 +5,7 @@ import { LLM } from '../model/LLM.js';
 import { log, logger } from '../utils/logger.js';
 import { htmlToPdf } from '../utils/pdfGenerator.js';
 import { scoreResume } from '../utils/atsScorer.js';
+import { TECH_SKILL_KEYWORDS } from '../utils/jobCleanup.js';
 
 const MAX_RESUME_FILE_BYTES = 2 * 1024 * 1024;
 const MAX_RESUME_FILE_BASE64_CHARS = Math.ceil(MAX_RESUME_FILE_BYTES / 3) * 4;
@@ -96,7 +97,28 @@ class ResumeController {
 
       logger.info(`[Resume] extracted ${resumeText.length} chars of text`);
 
-      const extracted = await this.llm.extractProfile(resumeText);
+      // LLM extraction must never fail the upload — a rate-limited or down
+      // provider still leaves the user with a saved, searchable resume.
+      let extracted: Record<string, unknown>;
+      try {
+        extracted = await this.llm.extractProfile(resumeText);
+      } catch (extractErr) {
+        logger.warn(`[Resume] Profile extraction LLM failed (non-fatal): ${extractErr}`);
+        await log(`[Resume] extractProfile failed, falling back to keyword extraction`);
+        const lower = resumeText.toLowerCase();
+        extracted = {
+          role: null,
+          location: null,
+          work_style: null,
+          work_style_hint: null,
+          experience: null,
+          experience_hint: null,
+          salary_target: null,
+          skills: TECH_SKILL_KEYWORDS.filter((skill) =>
+            new RegExp(`\\b${skill.replace(/[.*+?${}()|[\]\\]/g, '\\$&')}\\b`, 'i').test(lower),
+          ),
+        };
+      }
 
       const profilePayload: Record<string, unknown> = {
         resume_text: resumeText,

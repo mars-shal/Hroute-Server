@@ -29,15 +29,17 @@ test("job match HTTP returns ranked results with score, matched_skills, rank_rea
   const result = await controller.Search(
     fakeDb.state.accessToken,
     { limit: 1, location: "Lagos", remote: true },
-    (step) => progress.push(step.stage),
+    (step) => {
+    progress.push(step.stage);
+  },
   );
 
   expect(result.status).toBe(200);
   expect(result.jobs).toHaveLength(1);
-  expect(result.jobs[0].job_id).toBe("job-1");
-  expect(result.jobs[0].score).toBe(0.87);
-  expect(result.jobs[0].matched_skills).toEqual(["typescript", "react"]);
-  expect(result.jobs[0].rank_reasons).toContain("skill match");
+  expect(result.jobs[0]!.job_id).toBe("job-1");
+  expect(result.jobs[0]!.score).toBe(0.87);
+  expect(result.jobs[0]!.matched_skills).toEqual(["typescript", "react"]);
+  expect(result.jobs[0]!.rank_reasons).toContain("skill match");
   expect(result.source).toBe("computed");
   expect(progress).toContain("cache");
 });

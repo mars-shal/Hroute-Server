@@ -23,7 +23,7 @@ test("auth controller supports register, login, and profile lookup", async () =>
 
   const profile = await auth.GetProfile(fakeDb.state.accessToken);
   expect(profile.status).toBe(200);
-  expect(profile.user.email).toBe(fakeDb.state.email);
+  expect(profile.user!.email).toBe(fakeDb.state.email);
 });
 
 test("job search controller passes through ranked matches", async () => {
@@ -55,7 +55,7 @@ test("job search controller passes through ranked matches", async () => {
 
   expect(result.status).toBe(200);
   expect(result.jobs).toHaveLength(1);
-  expect(result.jobs[0].job_id).toBe("job-1");
+  expect(result.jobs[0]!.job_id).toBe("job-1");
   expect(result.source).toBe("computed");
   expect(progress).toContain("cache");
 });
